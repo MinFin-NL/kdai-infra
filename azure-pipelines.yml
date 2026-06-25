@@ -68,7 +68,7 @@ stages:
                 docker build \
                   -t "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:$IMAGE_TAG" \
                   -t "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:latest" \
-                  $(Pipeline.Workspace)/KDAI-backend
+                  $(Build.SourcesDirectory)/KDAI-backend
                 docker push "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:$IMAGE_TAG"
                 docker push "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:latest"
 
@@ -88,7 +88,7 @@ stages:
                 docker build \
                   -t "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:$IMAGE_TAG" \
                   -t "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:latest" \
-                  $(Pipeline.Workspace)/KDAI-frontend
+                  $(Build.SourcesDirectory)/KDAI-frontend
                 docker push "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:$IMAGE_TAG"
                 docker push "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:latest"
 
