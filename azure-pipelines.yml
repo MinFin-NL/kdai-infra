@@ -1,0 +1,323 @@
+trigger:
+  branches:
+    include:
+      - main
+
+# GitHub service connection must be created in Azure DevOps:
+# Project Settings → Service connections → New → GitHub → name it "github-kdai"
+resources:
+  repositories:
+    - repository: KDAI-backend
+      type: github
+      name: W-KDAI/KDAI-backend
+      ref: refs/heads/main
+      endpoint: github-kdai
+    - repository: KDAI-frontend
+      type: github
+      name: W-KDAI/KDAI-frontend
+      ref: refs/heads/main
+      endpoint: github-kdai
+
+pool:
+  name: alz-p-mgmt-we-ccoe-pool
+
+variables:
+  - group: kdai-secrets
+  - name: BACKEND_IMAGE
+    value: kdai-backend
+  - name: FRONTEND_IMAGE
+    value: kdai-frontend
+  - name: RESOURCE_GROUP
+    value: rg-kdai-inno-d
+  - name: CONTAINER_APP_ENV
+    value: cae-kdai-inno-d
+  - name: BACKEND_APP
+    value: ca-kdai-backend-inno-d
+  - name: FRONTEND_APP
+    value: ca-kdai-frontend-inno-d
+  - name: POSTGRES_APP
+    value: ca-kdai-postgres-inno-d
+  - name: MINIO_APP
+    value: ca-kdai-minio-inno-d
+
+
+stages:
+  - stage: Build
+    displayName: Build and push images
+    jobs:
+      - job: Build
+        displayName: Docker build and push to ACR
+        steps:
+          - checkout: self
+          - checkout: KDAI-backend
+          - checkout: KDAI-frontend
+
+          - task: AzureCLI@2
+            displayName: Build and push backend
+            env:
+              IMAGE_TAG: $(Build.BuildId)
+              BACKEND_IMAGE: $(BACKEND_IMAGE)
+              RESOURCE_GROUP: $(RESOURCE_GROUP)
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
+                az acr login --name "${ACR_LOGIN_SERVER%%.*}"
+                docker build \
+                  -t "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:$IMAGE_TAG" \
+                  -t "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:latest" \
+                  $(Pipeline.Workspace)/KDAI-backend
+                docker push "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:$IMAGE_TAG"
+                docker push "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:latest"
+
+          - task: AzureCLI@2
+            displayName: Build and push frontend
+            env:
+              IMAGE_TAG: $(Build.BuildId)
+              FRONTEND_IMAGE: $(FRONTEND_IMAGE)
+              RESOURCE_GROUP: $(RESOURCE_GROUP)
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
+                az acr login --name "${ACR_LOGIN_SERVER%%.*}"
+                docker build \
+                  -t "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:$IMAGE_TAG" \
+                  -t "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:latest" \
+                  $(Pipeline.Workspace)/KDAI-frontend
+                docker push "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:$IMAGE_TAG"
+                docker push "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:latest"
+
+  - stage: Deploy
+    displayName: Deploy to Container Apps
+    dependsOn: Build
+    jobs:
+      - job: Deploy
+        displayName: Deploy all services
+        steps:
+          # Deploy postgres first so its FQDN is available for the backend
+          - task: AzureCLI@2
+            displayName: Deploy postgres
+            env:
+              POSTGRES_APP: $(POSTGRES_APP)
+              RESOURCE_GROUP: $(RESOURCE_GROUP)
+              CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
+              POSTGRES_USER: $(POSTGRES_USER)
+              POSTGRES_PASSWORD: $(POSTGRES_PASSWORD)
+              POSTGRES_DB: $(POSTGRES_DB)
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                if az containerapp show --name "$POSTGRES_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
+                  az containerapp secret set \
+                    --name "$POSTGRES_APP" \
+                    --resource-group "$RESOURCE_GROUP" \
+                    --secrets \
+                      "postgres-user=${POSTGRES_USER}" \
+                      "postgres-password=${POSTGRES_PASSWORD}" \
+                      "postgres-db=${POSTGRES_DB}"
+                  az containerapp update \
+                    --name "$POSTGRES_APP" \
+                    --resource-group "$RESOURCE_GROUP" \
+                    --set-env-vars \
+                      "POSTGRES_USER=secretref:postgres-user" \
+                      "POSTGRES_PASSWORD=secretref:postgres-password" \
+                      "POSTGRES_DB=secretref:postgres-db"
+                else
+                  az containerapp create \
+                    --name "$POSTGRES_APP" \
+                    --resource-group "$RESOURCE_GROUP" \
+                    --environment "$CONTAINER_APP_ENV" \
+                    --image "postgres:16" \
+                    --ingress internal \
+                    --target-port 5432 \
+                    --transport tcp \
+                    --env-vars \
+                      "POSTGRES_USER=secretref:postgres-user" \
+                      "POSTGRES_PASSWORD=secretref:postgres-password" \
+                      "POSTGRES_DB=secretref:postgres-db" \
+                    --secrets \
+                      "postgres-user=${POSTGRES_USER}" \
+                      "postgres-password=${POSTGRES_PASSWORD}" \
+                      "postgres-db=${POSTGRES_DB}" \
+                    --cpu 0.5 --memory 1.0Gi \
+                    --min-replicas 1 --max-replicas 1
+                fi
+
+          - task: AzureCLI@2
+            displayName: Deploy minio
+            env:
+              MINIO_APP: $(MINIO_APP)
+              RESOURCE_GROUP: $(RESOURCE_GROUP)
+              CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
+              MINIO_ROOT_USER: $(MINIO_ROOT_USER)
+              MINIO_ROOT_PASSWORD: $(MINIO_ROOT_PASSWORD)
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                if az containerapp show --name "$MINIO_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
+                  az containerapp secret set \
+                    --name "$MINIO_APP" \
+                    --resource-group "$RESOURCE_GROUP" \
+                    --secrets \
+                      "minio-root-user=${MINIO_ROOT_USER}" \
+                      "minio-root-password=${MINIO_ROOT_PASSWORD}"
+                  az containerapp update \
+                    --name "$MINIO_APP" \
+                    --resource-group "$RESOURCE_GROUP" \
+                    --set-env-vars \
+                      "MINIO_ROOT_USER=secretref:minio-root-user" \
+                      "MINIO_ROOT_PASSWORD=secretref:minio-root-password"
+                else
+                  az containerapp create \
+                    --name "$MINIO_APP" \
+                    --resource-group "$RESOURCE_GROUP" \
+                    --environment "$CONTAINER_APP_ENV" \
+                    --image "minio/minio:latest" \
+                    --ingress internal \
+                    --target-port 9000 \
+                    --env-vars \
+                      "MINIO_ROOT_USER=secretref:minio-root-user" \
+                      "MINIO_ROOT_PASSWORD=secretref:minio-root-password" \
+                    --secrets \
+                      "minio-root-user=${MINIO_ROOT_USER}" \
+                      "minio-root-password=${MINIO_ROOT_PASSWORD}" \
+                    --command "minio" \
+                    --args "server" "/data" "--console-address" ":9001" \
+                    --cpu 0.5 --memory 1.0Gi \
+                    --min-replicas 1 --max-replicas 1
+                fi
+
+          - task: AzureCLI@2
+            displayName: Deploy backend
+            env:
+              IMAGE_TAG: $(Build.BuildId)
+              BACKEND_IMAGE: $(BACKEND_IMAGE)
+              BACKEND_APP: $(BACKEND_APP)
+              RESOURCE_GROUP: $(RESOURCE_GROUP)
+              CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
+              POSTGRES_APP: $(POSTGRES_APP)
+              MINIO_APP: $(MINIO_APP)
+              POSTGRES_USER: $(POSTGRES_USER)
+              POSTGRES_PASSWORD: $(POSTGRES_PASSWORD)
+              POSTGRES_DB: $(POSTGRES_DB)
+              MINIO_ROOT_USER: $(MINIO_ROOT_USER)
+              MINIO_ROOT_PASSWORD: $(MINIO_ROOT_PASSWORD)
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
+                ACR_NAME="${ACR_LOGIN_SERVER%%.*}"
+                ACR_USER=$(az acr credential show --name "$ACR_NAME" --query username -o tsv)
+                ACR_PASS=$(az acr credential show --name "$ACR_NAME" --query "passwords[0].value" -o tsv)
+
+                POSTGRES_FQDN=$(az containerapp show \
+                  --name "$POSTGRES_APP" \
+                  --resource-group "$RESOURCE_GROUP" \
+                  --query "properties.configuration.ingress.fqdn" -o tsv)
+                MINIO_FQDN=$(az containerapp show \
+                  --name "$MINIO_APP" \
+                  --resource-group "$RESOURCE_GROUP" \
+                  --query "properties.configuration.ingress.fqdn" -o tsv)
+
+                DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_FQDN}:5432/${POSTGRES_DB}"
+
+                if az containerapp show --name "$BACKEND_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
+                  az containerapp secret set \
+                    --name "$BACKEND_APP" \
+                    --resource-group "$RESOURCE_GROUP" \
+                    --secrets \
+                      "database-url=${DATABASE_URL}" \
+                      "minio-root-user=${MINIO_ROOT_USER}" \
+                      "minio-root-password=${MINIO_ROOT_PASSWORD}"
+                  az containerapp update \
+                    --name "$BACKEND_APP" \
+                    --resource-group "$RESOURCE_GROUP" \
+                    --image "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:$IMAGE_TAG" \
+                    --min-replicas 1 \
+                    --set-env-vars \
+                      "DATABASE_URL=secretref:database-url" \
+                      "MINIO_ENDPOINT=https://${MINIO_FQDN}" \
+                      "MINIO_ROOT_USER=secretref:minio-root-user" \
+                      "MINIO_ROOT_PASSWORD=secretref:minio-root-password"
+                else
+                  az containerapp create \
+                    --name "$BACKEND_APP" \
+                    --resource-group "$RESOURCE_GROUP" \
+                    --environment "$CONTAINER_APP_ENV" \
+                    --image "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:$IMAGE_TAG" \
+                    --registry-server "$ACR_LOGIN_SERVER" \
+                    --registry-username "$ACR_USER" \
+                    --registry-password "$ACR_PASS" \
+                    --ingress internal \
+                    --target-port 8000 \
+                    --env-vars \
+                      "DATABASE_URL=secretref:database-url" \
+                      "MINIO_ENDPOINT=https://${MINIO_FQDN}" \
+                      "MINIO_ROOT_USER=secretref:minio-root-user" \
+                      "MINIO_ROOT_PASSWORD=secretref:minio-root-password" \
+                    --secrets \
+                      "database-url=${DATABASE_URL}" \
+                      "minio-root-user=${MINIO_ROOT_USER}" \
+                      "minio-root-password=${MINIO_ROOT_PASSWORD}" \
+                    --cpu 0.5 --memory 1.0Gi \
+                    --min-replicas 1 --max-replicas 3
+                fi
+
+          - task: AzureCLI@2
+            displayName: Deploy frontend
+            env:
+              IMAGE_TAG: $(Build.BuildId)
+              FRONTEND_IMAGE: $(FRONTEND_IMAGE)
+              FRONTEND_APP: $(FRONTEND_APP)
+              BACKEND_APP: $(BACKEND_APP)
+              RESOURCE_GROUP: $(RESOURCE_GROUP)
+              CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
+                ACR_NAME="${ACR_LOGIN_SERVER%%.*}"
+                ACR_USER=$(az acr credential show --name "$ACR_NAME" --query username -o tsv)
+                ACR_PASS=$(az acr credential show --name "$ACR_NAME" --query "passwords[0].value" -o tsv)
+
+                BACKEND_FQDN=$(az containerapp show \
+                  --name "$BACKEND_APP" \
+                  --resource-group "$RESOURCE_GROUP" \
+                  --query "properties.configuration.ingress.fqdn" -o tsv)
+                BACKEND_URL="https://${BACKEND_FQDN}"
+
+                if az containerapp show --name "$FRONTEND_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
+                  az containerapp update \
+                    --name "$FRONTEND_APP" \
+                    --resource-group "$RESOURCE_GROUP" \
+                    --image "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:$IMAGE_TAG" \
+                    --min-replicas 1 \
+                    --set-env-vars "BACKEND_URL=${BACKEND_URL}"
+                else
+                  az containerapp create \
+                    --name "$FRONTEND_APP" \
+                    --resource-group "$RESOURCE_GROUP" \
+                    --environment "$CONTAINER_APP_ENV" \
+                    --image "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:$IMAGE_TAG" \
+                    --registry-server "$ACR_LOGIN_SERVER" \
+                    --registry-username "$ACR_USER" \
+                    --registry-password "$ACR_PASS" \
+                    --ingress external \
+                    --target-port 80 \
+                    --env-vars "BACKEND_URL=${BACKEND_URL}" \
+                    --cpu 0.25 --memory 0.5Gi \
+                    --min-replicas 1 --max-replicas 3
+                fi
