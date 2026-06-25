@@ -63,6 +63,21 @@ stages:
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
+                # HOTFIX: The KDAI-backend Dockerfile runs `php artisan key:generate` during the
+                # image build, but does not ensure a .env file exists beforehand. Laravel's
+                # key:generate command requires an existing .env file to write the APP_KEY into,
+                # so the build fails with "Failed to open stream: No such file or directory".
+                #
+                # The permanent fix is to add `RUN cp .env.example .env` (or `RUN touch .env`)
+                # to the KDAI-backend Dockerfile before the key:generate step. Until that change
+                # is made upstream, we create a minimal placeholder .env here so the file exists
+                # in the Docker build context when the COPY step runs.
+                #
+                # The APP_KEY written here is a temporary value; the real key must be injected
+                # at runtime via the Container App environment variable, which overrides the
+                # value baked into the image.
+                echo "APP_KEY=" > "$(Build.SourcesDirectory)/KDAI-backend/.env"
+
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
                 az acr login --name "${ACR_LOGIN_SERVER%%.*}"
                 docker build \
