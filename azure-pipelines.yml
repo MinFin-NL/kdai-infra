@@ -218,10 +218,15 @@ stages:
                       "minio-root-user=${MINIO_ROOT_USER}" \
                       "minio-root-password=${MINIO_ROOT_PASSWORD}" \
                     --command "minio" \
-                    --args "server" "/data"\
+                    --args "server" "/data" \
                     --cpu 0.5 --memory 1.0Gi \
                     --min-replicas 1 --max-replicas 1
                 fi
+
+                # The containerapp CLI extension can print an error yet exit 0, leaving the
+                # step green without creating anything. Assert the app actually exists.
+                az containerapp show --name "$MINIO_APP" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1 \
+                  || { echo "##[error]Minio app '$MINIO_APP' does not exist after the deploy step — see the 'az containerapp create' output above for the real failure."; exit 1; }
 
           - task: AzureCLI@2
             displayName: Deploy backend
