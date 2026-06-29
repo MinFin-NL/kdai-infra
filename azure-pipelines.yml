@@ -349,6 +349,10 @@ stages:
                     --resource-group "$RESOURCE_GROUP" \
                     --server "$ACR_LOGIN_SERVER" \
                     --identity system
+                  az containerapp ingress update \
+                    --name "$FRONTEND_APP" \
+                    --resource-group "$RESOURCE_GROUP" \
+                    --target-port 5173
                   az containerapp update \
                     --name "$FRONTEND_APP" \
                     --resource-group "$RESOURCE_GROUP" \
@@ -364,7 +368,7 @@ stages:
                     --registry-server "$ACR_LOGIN_SERVER" \
                     --registry-identity system \
                     --ingress external \
-                    --target-port 80 \
+                    --target-port 5173 \
                     --env-vars "BACKEND_URL=${BACKEND_URL}" \
                     --cpu 0.25 --memory 0.5Gi \
                     --min-replicas 1 --max-replicas 3
