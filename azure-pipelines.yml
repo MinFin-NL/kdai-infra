@@ -93,6 +93,8 @@ stages:
               IMAGE_TAG: $(Build.BuildId)
               FRONTEND_IMAGE: $(FRONTEND_IMAGE)
               RESOURCE_GROUP: $(RESOURCE_GROUP)
+              CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
+              BACKEND_APP: $(BACKEND_APP)
             inputs:
               azureSubscription: $(AZURE_SERVICE_CONNECTION)
               scriptType: bash
@@ -100,6 +102,17 @@ stages:
               inlineScript: |
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
                 az acr login --name "${ACR_LOGIN_SERVER%%.*}"
+
+                # Inject the API base URL at build time WITHOUT modifying the frontend repo.
+                # Vite bakes VITE_* vars into the bundle during `npm run build`, and the
+                # Dockerfile's `COPY . .` picks up this .env (which is git-ignored, so the repo
+                # is untouched). The SPA calls the backend's public ingress directly; the backend
+                # is exposed externally in the Deploy stage. Its external FQDN is deterministic:
+                # <app>.<env-default-domain>.
+                ENV_DOMAIN=$(az containerapp env show --name "$CONTAINER_APP_ENV" --resource-group "$RESOURCE_GROUP" --query properties.defaultDomain -o tsv)
+                [ -n "$ENV_DOMAIN" ] || { echo "##[error]Could not resolve default domain for Container Apps env $CONTAINER_APP_ENV"; exit 1; }
+                echo "VITE_API_BASE_URL=https://${BACKEND_APP}.${ENV_DOMAIN}/api" > "$(Build.SourcesDirectory)/KDAI-frontend/.env"
+
                 docker build \
                   -t "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:$IMAGE_TAG" \
                   -t "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:latest" \
@@ -283,6 +296,12 @@ stages:
                     --resource-group "$RESOURCE_GROUP" \
                     --server "$ACR_LOGIN_SERVER" \
                     --identity system
+                  az containerapp ingress enable \
+                    --name "$BACKEND_APP" \
+                    --resource-group "$RESOURCE_GROUP" \
+                    --type external \
+                    --target-port 8000 \
+                    --transport auto
                   az containerapp update \
                     --name "$BACKEND_APP" \
                     --resource-group "$RESOURCE_GROUP" \
@@ -302,7 +321,7 @@ stages:
                     --image "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:$IMAGE_TAG" \
                     --registry-server "$ACR_LOGIN_SERVER" \
                     --registry-identity system \
-                    --ingress internal \
+                    --ingress external \
                     --target-port 8000 \
                     --env-vars \
                       "DATABASE_URL=secretref:database-url" \
