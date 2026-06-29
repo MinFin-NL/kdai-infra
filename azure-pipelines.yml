@@ -200,7 +200,8 @@ stages:
                     --resource-group "$RESOURCE_GROUP" \
                     --set-env-vars \
                       "MINIO_ROOT_USER=secretref:minio-root-user" \
-                      "MINIO_ROOT_PASSWORD=secretref:minio-root-password"
+                      "MINIO_ROOT_PASSWORD=secretref:minio-root-password" \
+                      "MINIO_CONSOLE_ADDRESS=:9001" \
                 else
                   az containerapp create \
                     --name "$MINIO_APP" \
@@ -212,11 +213,12 @@ stages:
                     --env-vars \
                       "MINIO_ROOT_USER=secretref:minio-root-user" \
                       "MINIO_ROOT_PASSWORD=secretref:minio-root-password" \
+                      "MINIO_CONSOLE_ADDRESS=:9001" \
                     --secrets \
                       "minio-root-user=${MINIO_ROOT_USER}" \
                       "minio-root-password=${MINIO_ROOT_PASSWORD}" \
                     --command "minio" \
-                    --args "server" "/data" "--console-address" ":9001" \
+                    --args "server" "/data"\
                     --cpu 0.5 --memory 1.0Gi \
                     --min-replicas 1 --max-replicas 1
                 fi
