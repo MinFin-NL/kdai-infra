@@ -201,7 +201,7 @@ stages:
                     --set-env-vars \
                       "MINIO_ROOT_USER=secretref:minio-root-user" \
                       "MINIO_ROOT_PASSWORD=secretref:minio-root-password" \
-                      "MINIO_CONSOLE_ADDRESS=:9001" \
+                      "MINIO_CONSOLE_ADDRESS=:9001"
                 else
                   az containerapp create \
                     --name "$MINIO_APP" \
