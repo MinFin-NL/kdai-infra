@@ -243,6 +243,7 @@ stages:
               POSTGRES_DB: $(POSTGRES_DB)
               MINIO_ROOT_USER: $(MINIO_ROOT_USER)
               MINIO_ROOT_PASSWORD: $(MINIO_ROOT_PASSWORD)
+              APP_KEY: $(APP_KEY)
             inputs:
               azureSubscription: $(AZURE_SERVICE_CONNECTION)
               scriptType: bash
@@ -250,6 +251,9 @@ stages:
               inlineScript: |
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
                 [ -n "$ACR_LOGIN_SERVER" ] || { echo "##[error]No ACR found in resource group $RESOURCE_GROUP"; exit 1; }
+                case "$APP_KEY" in
+                  ""|'$('*) echo "##[error]APP_KEY is not set in the kdai-secrets variable group"; exit 1 ;;
+                esac
 
                 POSTGRES_FQDN=$(az containerapp show \
                   --name "$POSTGRES_APP" \
@@ -272,7 +276,8 @@ stages:
                     --secrets \
                       "database-url=${DATABASE_URL}" \
                       "minio-root-user=${MINIO_ROOT_USER}" \
-                      "minio-root-password=${MINIO_ROOT_PASSWORD}"
+                      "minio-root-password=${MINIO_ROOT_PASSWORD}" \
+                      "app-key=${APP_KEY}"
                   az containerapp registry set \
                     --name "$BACKEND_APP" \
                     --resource-group "$RESOURCE_GROUP" \
@@ -287,7 +292,8 @@ stages:
                       "DATABASE_URL=secretref:database-url" \
                       "MINIO_ENDPOINT=https://${MINIO_FQDN}" \
                       "MINIO_ROOT_USER=secretref:minio-root-user" \
-                      "MINIO_ROOT_PASSWORD=secretref:minio-root-password"
+                      "MINIO_ROOT_PASSWORD=secretref:minio-root-password" \
+                      "APP_KEY=secretref:app-key"
                 else
                   az containerapp create \
                     --name "$BACKEND_APP" \
@@ -303,10 +309,12 @@ stages:
                       "MINIO_ENDPOINT=https://${MINIO_FQDN}" \
                       "MINIO_ROOT_USER=secretref:minio-root-user" \
                       "MINIO_ROOT_PASSWORD=secretref:minio-root-password" \
+                      "APP_KEY=secretref:app-key" \
                     --secrets \
                       "database-url=${DATABASE_URL}" \
                       "minio-root-user=${MINIO_ROOT_USER}" \
                       "minio-root-password=${MINIO_ROOT_PASSWORD}" \
+                      "app-key=${APP_KEY}" \
                     --cpu 0.5 --memory 1.0Gi \
                     --min-replicas 1 --max-replicas 3
                 fi
