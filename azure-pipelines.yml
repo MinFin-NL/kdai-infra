@@ -129,6 +129,11 @@ stages:
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
+                for v in POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB; do
+                  case "${!v}" in
+                    ""|'$('*) echo "##[error]$v is not set in the kdai-secrets variable group"; exit 1 ;;
+                  esac
+                done
                 if az containerapp show --name "$POSTGRES_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
                   az containerapp secret set \
                     --name "$POSTGRES_APP" \
@@ -178,6 +183,11 @@ stages:
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
+                for v in MINIO_ROOT_USER MINIO_ROOT_PASSWORD; do
+                  case "${!v}" in
+                    ""|'$('*) echo "##[error]$v is not set in the kdai-secrets variable group"; exit 1 ;;
+                  esac
+                done
                 if az containerapp show --name "$MINIO_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
                   az containerapp secret set \
                     --name "$MINIO_APP" \
@@ -232,9 +242,7 @@ stages:
               scriptLocation: inlineScript
               inlineScript: |
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
-                ACR_NAME="${ACR_LOGIN_SERVER%%.*}"
-                ACR_USER=$(az acr credential show --name "$ACR_NAME" --query username -o tsv)
-                ACR_PASS=$(az acr credential show --name "$ACR_NAME" --query "passwords[0].value" -o tsv)
+                [ -n "$ACR_LOGIN_SERVER" ] || { echo "##[error]No ACR found in resource group $RESOURCE_GROUP"; exit 1; }
 
                 POSTGRES_FQDN=$(az containerapp show \
                   --name "$POSTGRES_APP" \
@@ -244,6 +252,9 @@ stages:
                   --name "$MINIO_APP" \
                   --resource-group "$RESOURCE_GROUP" \
                   --query "properties.configuration.ingress.fqdn" -o tsv)
+
+                [ -n "$POSTGRES_FQDN" ] || { echo "##[error]Postgres app '$POSTGRES_APP' not found — its deploy step must succeed first."; exit 1; }
+                [ -n "$MINIO_FQDN" ] || { echo "##[error]Minio app '$MINIO_APP' not found — its deploy step must succeed first."; exit 1; }
 
                 DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_FQDN}:5432/${POSTGRES_DB}"
 
@@ -255,6 +266,11 @@ stages:
                       "database-url=${DATABASE_URL}" \
                       "minio-root-user=${MINIO_ROOT_USER}" \
                       "minio-root-password=${MINIO_ROOT_PASSWORD}"
+                  az containerapp registry set \
+                    --name "$BACKEND_APP" \
+                    --resource-group "$RESOURCE_GROUP" \
+                    --server "$ACR_LOGIN_SERVER" \
+                    --identity system
                   az containerapp update \
                     --name "$BACKEND_APP" \
                     --resource-group "$RESOURCE_GROUP" \
@@ -272,8 +288,7 @@ stages:
                     --environment "$CONTAINER_APP_ENV" \
                     --image "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:$IMAGE_TAG" \
                     --registry-server "$ACR_LOGIN_SERVER" \
-                    --registry-username "$ACR_USER" \
-                    --registry-password "$ACR_PASS" \
+                    --registry-identity system \
                     --ingress internal \
                     --target-port 8000 \
                     --env-vars \
@@ -304,17 +319,21 @@ stages:
               scriptLocation: inlineScript
               inlineScript: |
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
-                ACR_NAME="${ACR_LOGIN_SERVER%%.*}"
-                ACR_USER=$(az acr credential show --name "$ACR_NAME" --query username -o tsv)
-                ACR_PASS=$(az acr credential show --name "$ACR_NAME" --query "passwords[0].value" -o tsv)
+                [ -n "$ACR_LOGIN_SERVER" ] || { echo "##[error]No ACR found in resource group $RESOURCE_GROUP"; exit 1; }
 
                 BACKEND_FQDN=$(az containerapp show \
                   --name "$BACKEND_APP" \
                   --resource-group "$RESOURCE_GROUP" \
                   --query "properties.configuration.ingress.fqdn" -o tsv)
+                [ -n "$BACKEND_FQDN" ] || { echo "##[error]Backend app '$BACKEND_APP' not found — its deploy step must succeed first."; exit 1; }
                 BACKEND_URL="https://${BACKEND_FQDN}"
 
                 if az containerapp show --name "$FRONTEND_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
+                  az containerapp registry set \
+                    --name "$FRONTEND_APP" \
+                    --resource-group "$RESOURCE_GROUP" \
+                    --server "$ACR_LOGIN_SERVER" \
+                    --identity system
                   az containerapp update \
                     --name "$FRONTEND_APP" \
                     --resource-group "$RESOURCE_GROUP" \
@@ -328,8 +347,7 @@ stages:
                     --environment "$CONTAINER_APP_ENV" \
                     --image "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:$IMAGE_TAG" \
                     --registry-server "$ACR_LOGIN_SERVER" \
-                    --registry-username "$ACR_USER" \
-                    --registry-password "$ACR_PASS" \
+                    --registry-identity system \
                     --ingress external \
                     --target-port 80 \
                     --env-vars "BACKEND_URL=${BACKEND_URL}" \
