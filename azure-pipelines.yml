@@ -69,6 +69,12 @@ variables:
     value: kdai-atts-tfs
   - name: TCS_IMAGE
     value: kdai-tcs
+  # Debat emulator: the backend hardcodes the host "kdai-m3u8-emulator", so the Container
+  # App MUST be named exactly that (not the ca-...-inno-d convention) for short-name lookup.
+  - name: M3U8_APP
+    value: kdai-m3u8-emulator
+  - name: M3U8_IMAGE
+    value: kdai-m3u8-emulator
 
 
 stages:
@@ -196,6 +202,7 @@ stages:
               TS_IMAGE: $(TS_IMAGE)
               TFS_IMAGE: $(TFS_IMAGE)
               TCS_IMAGE: $(TCS_IMAGE)
+              M3U8_IMAGE: $(M3U8_IMAGE)
             inputs:
               azureSubscription: $(AZURE_SERVICE_CONNECTION)
               scriptType: bash
@@ -241,6 +248,7 @@ stages:
                 build_and_push "$TS_IMAGE"        "ATTS/TS"
                 build_and_push "$TFS_IMAGE"       "ATTS/TFS"
                 build_and_push "$TCS_IMAGE"       "TCS"
+                build_and_push "$M3U8_IMAGE"      "M3U8-emulator"
 
   - stage: Deploy
     displayName: Deploy to Container Apps
@@ -495,6 +503,44 @@ stages:
                   "TFS_DOCKER_PORT=7030" \
                   "MINIO_TFS_USER=secretref:minio-user" \
                   "MINIO_TFS_PASSWORD=secretref:minio-password"
+
+          - task: AzureCLI@2
+            displayName: Deploy M3U8 emulator (simulation stream)
+            env:
+              RESOURCE_GROUP: $(RESOURCE_GROUP)
+              CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
+              IMAGE_TAG: $(Build.BuildId)
+              M3U8_APP: $(M3U8_APP)
+              M3U8_IMAGE: $(M3U8_IMAGE)
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                # The "Debat emulator" serves a looping fake HLS stream on :2121 (nginx + ffmpeg
+                # over debat-sample.mp3). When the emulator is toggled ON in App Management, the
+                # backend points transcription at http://kdai-m3u8-emulator:2121/hls/stream.m3u8
+                # (hardcoded host), which CSP fetches. The app MUST be named exactly
+                # "kdai-m3u8-emulator" so CSP's short-name lookup resolves to it.
+                ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
+                [ -n "$ACR_LOGIN_SERVER" ] || { echo "##[error]No ACR found in resource group $RESOURCE_GROUP"; exit 1; }
+                if az containerapp show --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
+                  az containerapp registry set --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" --server "$ACR_LOGIN_SERVER" --identity system
+                  az containerapp ingress enable --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" --type internal --target-port 2121 --transport auto 2>/dev/null || true
+                  az containerapp update --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" \
+                    --image "$ACR_LOGIN_SERVER/$M3U8_IMAGE:$IMAGE_TAG" --min-replicas 1 \
+                    --set-env-vars "USE_INTERNAL_M3U8_STREAMING=true"
+                else
+                  az containerapp create --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" \
+                    --environment "$CONTAINER_APP_ENV" \
+                    --image "$ACR_LOGIN_SERVER/$M3U8_IMAGE:$IMAGE_TAG" \
+                    --registry-server "$ACR_LOGIN_SERVER" --registry-identity system \
+                    --ingress internal --target-port 2121 --transport auto \
+                    --env-vars "USE_INTERNAL_M3U8_STREAMING=true" \
+                    --cpu 0.5 --memory 1.0Gi --min-replicas 1 --max-replicas 1
+                fi
+                az containerapp show --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1 \
+                  || { echo "##[error]M3U8 emulator app '$M3U8_APP' does not exist after deploy."; exit 1; }
 
           - task: AzureCLI@2
             displayName: Deploy backend
