@@ -109,6 +109,15 @@ stages:
                 # value baked into the image.
                 echo "APP_KEY=" > "$(Build.SourcesDirectory)/KDAI-backend/.env"
 
+                # PIPELINE OVERRIDE (app repo is read-only): replace supervisord.conf with one that
+                # runs `php artisan config:cache` at startup. PHP's built-in `artisan serve` web
+                # server does not expose Container App env vars to Laravel's env(), so without a
+                # config cache the web process falls back to defaults (DB_CONNECTION=sqlite). The
+                # CLI config:cache reads the env correctly and bakes it for the web/queue processes.
+                OVERRIDE_ROOT=$(find "$(Build.SourcesDirectory)" -maxdepth 4 -type d -name pipeline-overrides | head -1)
+                [ -n "$OVERRIDE_ROOT" ] || { echo "##[error]pipeline-overrides dir not found under sources"; exit 1; }
+                cp "$OVERRIDE_ROOT/backend/supervisord.conf" "$(Build.SourcesDirectory)/KDAI-backend/supervisord.conf"
+
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
                 az acr login --name "${ACR_LOGIN_SERVER%%.*}"
                 docker build \
@@ -423,7 +432,9 @@ stages:
                 ENV_DOMAIN=$(az containerapp env show --name "$CONTAINER_APP_ENV" --resource-group "$RESOURCE_GROUP" --query properties.defaultDomain -o tsv)
                 [ -n "$ENV_DOMAIN" ] || { echo "##[error]Could not resolve default domain for Container Apps env $CONTAINER_APP_ENV"; exit 1; }
 
-                REDIS_URL="redis://${REDIS_APP}.internal.${ENV_DOMAIN}:6379/0"
+                # TCP services (Redis/Postgres) must be reached by SHORT app name; the long
+                # .internal.<domain> FQDN resolves to the HTTP ingress LB, which does not serve TCP.
+                REDIS_URL="redis://${REDIS_APP}:6379/0"
                 MINIO_HOST="${MINIO_APP}.internal.${ENV_DOMAIN}"
 
                 # Env shared by all ATTS workers (MinIO over the env's internal https ingress).
@@ -533,7 +544,9 @@ stages:
                 [ -n "$POSTGRES_FQDN" ] || { echo "##[error]Postgres app '$POSTGRES_APP' not found — its deploy step must succeed first."; exit 1; }
                 [ -n "$MINIO_FQDN" ] || { echo "##[error]Minio app '$MINIO_APP' not found — its deploy step must succeed first."; exit 1; }
 
-                DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_FQDN}:5432/${POSTGRES_DB}"
+                # Use the SHORT app name as host: TCP ingress is only reachable that way
+                # (the long .internal.<domain> FQDN is the HTTP ingress LB and times out on 5432).
+                DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_APP}:5432/${POSTGRES_DB}"
 
                 # Resolve deterministic FQDNs for the transcription services + Reverb so the
                 # backend is wired even if those apps are created later in this same job.
@@ -668,7 +681,9 @@ stages:
                 ENV_DOMAIN=$(az containerapp env show --name "$CONTAINER_APP_ENV" --resource-group "$RESOURCE_GROUP" --query properties.defaultDomain -o tsv)
                 [ -n "$ENV_DOMAIN" ] || { echo "##[error]Could not resolve default domain for Container Apps env $CONTAINER_APP_ENV"; exit 1; }
                 BACKEND_FQDN="${BACKEND_APP}.${ENV_DOMAIN}"
-                REDIS_URL="redis://${REDIS_APP}.internal.${ENV_DOMAIN}:6379/0"
+                # TCP services (Redis/Postgres) must be reached by SHORT app name; the long
+                # .internal.<domain> FQDN resolves to the HTTP ingress LB, which does not serve TCP.
+                REDIS_URL="redis://${REDIS_APP}:6379/0"
 
                 ENV_VARS=( \
                   "CONDUCTOR_DOCKER_PORT=7000" \
@@ -724,7 +739,9 @@ stages:
                 [ -n "$ACR_LOGIN_SERVER" ] || { echo "##[error]No ACR found in resource group $RESOURCE_GROUP"; exit 1; }
                 ENV_DOMAIN=$(az containerapp env show --name "$CONTAINER_APP_ENV" --resource-group "$RESOURCE_GROUP" --query properties.defaultDomain -o tsv)
                 [ -n "$ENV_DOMAIN" ] || { echo "##[error]Could not resolve default domain for Container Apps env $CONTAINER_APP_ENV"; exit 1; }
-                REDIS_URL="redis://${REDIS_APP}.internal.${ENV_DOMAIN}:6379/0"
+                # TCP services (Redis/Postgres) must be reached by SHORT app name; the long
+                # .internal.<domain> FQDN resolves to the HTTP ingress LB, which does not serve TCP.
+                REDIS_URL="redis://${REDIS_APP}:6379/0"
                 MINIO_HOST="${MINIO_APP}.internal.${ENV_DOMAIN}"
 
                 ENV_VARS=( \
@@ -788,7 +805,9 @@ stages:
                 [ -n "$ACR_LOGIN_SERVER" ] || { echo "##[error]No ACR found in resource group $RESOURCE_GROUP"; exit 1; }
                 POSTGRES_FQDN=$(az containerapp show --name "$POSTGRES_APP" --resource-group "$RESOURCE_GROUP" --query "properties.configuration.ingress.fqdn" -o tsv)
                 [ -n "$POSTGRES_FQDN" ] || { echo "##[error]Postgres app '$POSTGRES_APP' not found."; exit 1; }
-                DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_FQDN}:5432/${POSTGRES_DB}"
+                # Use the SHORT app name as host: TCP ingress is only reachable that way
+                # (the long .internal.<domain> FQDN is the HTTP ingress LB and times out on 5432).
+                DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_APP}:5432/${POSTGRES_DB}"
 
                 ENV_VARS=( \
                   "DB_CONNECTION=pgsql" \
@@ -821,7 +840,7 @@ stages:
                     --ingress external --target-port 8080 --transport auto \
                     --secrets "${SECRETS[@]}" \
                     --env-vars "${ENV_VARS[@]}" \
-                    --command "php" --args "artisan" "reverb:start" \
+                    --command "sh" --args "-c" "php /app/artisan config:cache && php /app/artisan reverb:start" \
                     --cpu 0.5 --memory 1.0Gi --min-replicas 1 --max-replicas 1
                 fi
                 az containerapp show --name "$REVERB_APP" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1 \
