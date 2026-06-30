@@ -818,7 +818,7 @@ stages:
                     --ingress external --target-port 8080 --transport auto \
                     --secrets "${SECRETS[@]}" \
                     --env-vars "${ENV_VARS[@]}" \
-                    --command "php" --args "artisan" "reverb:start" "--host=0.0.0.0" "--port=8080" \
+                    --command "php" --args "artisan" "reverb:start" \
                     --cpu 0.5 --memory 1.0Gi --min-replicas 1 --max-replicas 1
                 fi
                 az containerapp show --name "$REVERB_APP" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1 \
