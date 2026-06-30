@@ -689,9 +689,9 @@ stages:
                   "CONDUCTOR_DOCKER_PORT=7000" \
                   "REDIS_URL=${REDIS_URL}" \
                   "KDAI_LLM_HEALTH_URL=http://localhost" \
-                  "KDAI_TS_HEALTH_URL=https://${TS_APP}.internal.${ENV_DOMAIN}/health" \
-                  "KDAI_CSP_HEALTH_URL=https://${CSP_APP}.internal.${ENV_DOMAIN}/health" \
-                  "KDAI_TFS_HEALTH_URL=https://${TFS_APP}.internal.${ENV_DOMAIN}/health" \
+                  "TS_HEALTH_URL=https://${TS_APP}.internal.${ENV_DOMAIN}/health" \
+                  "CSP_HEALTH_URL=https://${CSP_APP}.internal.${ENV_DOMAIN}/health" \
+                  "TFS_HEALTH_URL=https://${TFS_APP}.internal.${ENV_DOMAIN}/health" \
                   "DEBATE_ID_PATTERN=^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$" \
                   "M3U8_URL_PATTERN=^(https?://[^\s]+\.m3u8)" \
                   "BACKEND_TRANSCRIPT_URL=https://${BACKEND_FQDN}/api/debate/transcript" \
@@ -840,7 +840,7 @@ stages:
                     --ingress external --target-port 8080 --transport auto \
                     --secrets "${SECRETS[@]}" \
                     --env-vars "${ENV_VARS[@]}" \
-                    --command "sh" --args "-c" "php /app/artisan config:cache && php /app/artisan reverb:start" \
+                    --command "php" --args "artisan" "reverb:start" \
                     --cpu 0.5 --memory 1.0Gi --min-replicas 1 --max-replicas 1
                 fi
                 az containerapp show --name "$REVERB_APP" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1 \
