@@ -1,0 +1,9 @@
+uvicorn==0.34.0
+fastapi==0.115.12
+requests==2.32.3
+redis==5.2.1
+python-dotenv==1.0.1
+
+minio==7.2.15
+pydub==0.25.1
+azure-cognitiveservices-speech==1.40.0
