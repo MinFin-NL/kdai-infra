@@ -574,7 +574,8 @@ stages:
                     --image "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:$IMAGE_TAG" \
                     --min-replicas 1 \
                     --set-env-vars \
-                      "DATABASE_URL=secretref:database-url" \
+                      "DB_CONNECTION=pgsql" \
+                      "DB_URL=secretref:database-url" \
                       "MINIO_ENDPOINT=https://${MINIO_FQDN}" \
                       "MINIO_ACCESS_KEY=secretref:minio-root-user" \
                       "MINIO_SECRET_KEY=secretref:minio-root-password" \
@@ -605,7 +606,8 @@ stages:
                     --ingress external \
                     --target-port 8000 \
                     --env-vars \
-                      "DATABASE_URL=secretref:database-url" \
+                      "DB_CONNECTION=pgsql" \
+                      "DB_URL=secretref:database-url" \
                       "MINIO_ENDPOINT=https://${MINIO_FQDN}" \
                       "MINIO_ACCESS_KEY=secretref:minio-root-user" \
                       "MINIO_SECRET_KEY=secretref:minio-root-password" \
@@ -789,7 +791,8 @@ stages:
                 DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_FQDN}:5432/${POSTGRES_DB}"
 
                 ENV_VARS=( \
-                  "DATABASE_URL=secretref:database-url" \
+                  "DB_CONNECTION=pgsql" \
+                  "DB_URL=secretref:database-url" \
                   "APP_KEY=secretref:app-key" \
                   "BROADCAST_CONNECTION=reverb" \
                   "REVERB_SERVER_HOST=0.0.0.0" \
