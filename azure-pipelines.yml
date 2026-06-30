@@ -75,10 +75,10 @@ variables:
     value: kdai-m3u8-emulator
   - name: M3U8_IMAGE
     value: kdai-m3u8-emulator
-  # One-shot job that creates the MinIO "debates" bucket
+  # Always-on helper app that ensures the MinIO "debates" bucket exists
   - name: MINIO_INIT_IMAGE
     value: kdai-minio-init
-  - name: MINIO_INIT_JOB
+  - name: MINIO_INIT_APP
     value: ca-kdai-minio-init
 
 
@@ -391,14 +391,14 @@ stages:
                   || { echo "##[error]Minio app '$MINIO_APP' does not exist after the deploy step — see the 'az containerapp create' output above for the real failure."; exit 1; }
 
           - task: AzureCLI@2
-            displayName: Create MinIO debates bucket
+            displayName: Ensure MinIO debates bucket
             env:
               RESOURCE_GROUP: $(RESOURCE_GROUP)
               CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
               IMAGE_TAG: $(Build.BuildId)
               MINIO_APP: $(MINIO_APP)
               MINIO_INIT_IMAGE: $(MINIO_INIT_IMAGE)
-              MINIO_INIT_JOB: $(MINIO_INIT_JOB)
+              MINIO_INIT_APP: $(MINIO_INIT_APP)
               MINIO_ROOT_USER: $(MINIO_ROOT_USER)
               MINIO_ROOT_PASSWORD: $(MINIO_ROOT_PASSWORD)
             inputs:
@@ -406,27 +406,33 @@ stages:
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
-                # Run a one-shot Container Apps Job (minio/mc) INSIDE the environment to create the
-                # "debates" bucket. The backend (getFullTranscript) and ATTS services read/write
-                # objects there; without it MinIO returns "Unable to check existence" / write errors.
-                # Delete-then-create keeps it simple and always runs the latest init image; the
-                # init itself is idempotent (mc mb --ignore-existing).
+                # Lightweight always-on Container App (minio/mc) that creates the "debates" bucket
+                # and re-ensures it hourly. The backend (getFullTranscript) and ATTS services
+                # read/write objects there; without it MinIO returns "Unable to check existence".
+                # Deployed as an APP (not a Job) because Microsoft.App/jobs may be restricted here.
+                # No ingress (pure background worker).
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
                 [ -n "$ACR_LOGIN_SERVER" ] || { echo "##[error]No ACR found in resource group $RESOURCE_GROUP"; exit 1; }
                 ENV_DOMAIN=$(az containerapp env show --name "$CONTAINER_APP_ENV" --resource-group "$RESOURCE_GROUP" --query properties.defaultDomain -o tsv)
                 [ -n "$ENV_DOMAIN" ] || { echo "##[error]Could not resolve default domain"; exit 1; }
                 MINIO_URL="https://${MINIO_APP}.internal.${ENV_DOMAIN}"
 
-                az containerapp job delete --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP" --yes 2>/dev/null || true
-                az containerapp job create --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP" \
-                  --environment "$CONTAINER_APP_ENV" \
-                  --trigger-type Manual --replica-timeout 180 --replica-retry-limit 1 \
-                  --image "$ACR_LOGIN_SERVER/$MINIO_INIT_IMAGE:$IMAGE_TAG" \
-                  --registry-server "$ACR_LOGIN_SERVER" --registry-identity system \
-                  --cpu 0.25 --memory 0.5Gi \
-                  --secrets "minio-root-user=${MINIO_ROOT_USER}" "minio-root-password=${MINIO_ROOT_PASSWORD}" \
-                  --env-vars "MINIO_URL=${MINIO_URL}" "MINIO_ROOT_USER=secretref:minio-root-user" "MINIO_ROOT_PASSWORD=secretref:minio-root-password"
-                az containerapp job start --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP"
+                if az containerapp show --name "$MINIO_INIT_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
+                  az containerapp secret set --name "$MINIO_INIT_APP" --resource-group "$RESOURCE_GROUP" \
+                    --secrets "minio-root-user=${MINIO_ROOT_USER}" "minio-root-password=${MINIO_ROOT_PASSWORD}"
+                  az containerapp registry set --name "$MINIO_INIT_APP" --resource-group "$RESOURCE_GROUP" --server "$ACR_LOGIN_SERVER" --identity system
+                  az containerapp update --name "$MINIO_INIT_APP" --resource-group "$RESOURCE_GROUP" \
+                    --image "$ACR_LOGIN_SERVER/$MINIO_INIT_IMAGE:$IMAGE_TAG" --min-replicas 1 \
+                    --set-env-vars "MINIO_URL=${MINIO_URL}" "MINIO_ROOT_USER=secretref:minio-root-user" "MINIO_ROOT_PASSWORD=secretref:minio-root-password"
+                else
+                  az containerapp create --name "$MINIO_INIT_APP" --resource-group "$RESOURCE_GROUP" \
+                    --environment "$CONTAINER_APP_ENV" \
+                    --image "$ACR_LOGIN_SERVER/$MINIO_INIT_IMAGE:$IMAGE_TAG" \
+                    --registry-server "$ACR_LOGIN_SERVER" --registry-identity system \
+                    --secrets "minio-root-user=${MINIO_ROOT_USER}" "minio-root-password=${MINIO_ROOT_PASSWORD}" \
+                    --env-vars "MINIO_URL=${MINIO_URL}" "MINIO_ROOT_USER=secretref:minio-root-user" "MINIO_ROOT_PASSWORD=secretref:minio-root-password" \
+                    --cpu 0.25 --memory 0.5Gi --min-replicas 1 --max-replicas 1
+                fi
 
           - task: AzureCLI@2
             displayName: Deploy Redis (ATTS message bus)
