@@ -57,6 +57,8 @@ variables:
     value: ca-kdai-atts-tfs-inno-d
   - name: TCS_APP
     value: ca-kdai-tcs-inno-d
+  - name: QES_APP
+    value: ca-kdai-qes-inno-d
   - name: REVERB_APP
     value: ca-kdai-reverb-inno-d
   - name: CONDUCTOR_IMAGE
@@ -69,6 +71,8 @@ variables:
     value: kdai-atts-tfs
   - name: TCS_IMAGE
     value: kdai-tcs
+  - name: QES_IMAGE
+    value: kdai-qes
   # Debat emulator: the backend hardcodes the host "kdai-m3u8-emulator", so the Container
   # App MUST be named exactly that (not the ca-...-inno-d convention) for short-name lookup.
   - name: M3U8_APP
@@ -147,6 +151,23 @@ stages:
                   echo "##[warning]DebateUserRoleRepository.php not found; skipped the idempotent-insert patch"
                 fi
 
+                # PIPELINE OVERRIDE (app repo is read-only): make the live transcript recoverable.
+                # (1) getFullTranscript rebuilds the transcript from every per-segment file, so a
+                # browser that reconnects/refreshes reloads the whole transcript-so-far from MinIO
+                # instead of showing an empty panel (previously it only read TCS's full_transcript.txt,
+                # which holds only reviewer-confirmed segments). (2) MinIOService.listFiles must be
+                # recursive for that (per-segment files are nested under transcripts/<segment>/), and
+                # it has no other caller, so switch files() -> allFiles().
+                BE_SRC="$(Build.SourcesDirectory)/KDAI-backend"
+                cp "$OVERRIDE_ROOT/backend/app/Http/Controllers/DebateControllers/DebateTranscriptController.php" \
+                   "$BE_SRC/app/Http/Controllers/DebateControllers/DebateTranscriptController.php"
+                MINIO_SVC="$BE_SRC/app/Services/MinIOService.php"
+                if [ -f "$MINIO_SVC" ]; then
+                  sed -i 's/->files($directory)/->allFiles($directory)/' "$MINIO_SVC"
+                else
+                  echo "##[warning]MinIOService.php not found; skipped the recursive-list patch"
+                fi
+
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
                 az acr login --name "${ACR_LOGIN_SERVER%%.*}"
                 docker build \
@@ -210,6 +231,15 @@ stages:
                   fi
                 done
 
+                # PIPELINE OVERRIDE: re-fetch the full transcript whenever the websocket (re)connects,
+                # so a Reverb restart / dropped connection / page refresh reloads the transcript from
+                # the backend instead of leaving the panel empty. Only DebateTranscript.vue has
+                # getFullTranscript(); pusher fires "connected" on the initial connect and every reconnect.
+                TRANSCRIPT_VUE="$FRONTEND_VIEWS/DebateTranscript.vue"
+                if [ -f "$TRANSCRIPT_VUE" ] && ! grep -q 'bind("connected"' "$TRANSCRIPT_VUE"; then
+                  sed -i 's|const channel = this.echoInstance.channel(`transcript.${this.debateID}`);|this.echoInstance.connector.pusher.connection.bind("connected", () => this.getFullTranscript());\n\n            const channel = this.echoInstance.channel(`transcript.${this.debateID}`);|' "$TRANSCRIPT_VUE"
+                fi
+
                 docker build \
                   -t "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:$IMAGE_TAG" \
                   -t "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:latest" \
@@ -228,6 +258,7 @@ stages:
               TFS_IMAGE: $(TFS_IMAGE)
               TCS_IMAGE: $(TCS_IMAGE)
               M3U8_IMAGE: $(M3U8_IMAGE)
+              QES_IMAGE: $(QES_IMAGE)
               MINIO_INIT_IMAGE: $(MINIO_INIT_IMAGE)
             inputs:
               azureSubscription: $(AZURE_SERVICE_CONNECTION)
@@ -269,6 +300,12 @@ stages:
                 cp "$TS_OVR/app/config.py"           "$SRC/ATTS/TS/app/config.py"
                 cp "$TS_OVR/requirements.txt"        "$SRC/ATTS/TS/requirements.txt"
 
+                # QES: swap the Ollama LLM call for Azure OpenAI (chat completions REST API), so the
+                # questions feature runs on the managed Azure LLM instead of a local GPU/Ollama.
+                QES_OVR="$OVERRIDE_ROOT/QES"
+                cp "$QES_OVR/app/config.py"                   "$SRC/QES/app/config.py"
+                cp "$QES_OVR/app/core/question_extraction.py" "$SRC/QES/app/core/question_extraction.py"
+
                 # PIPELINE OVERRIDE: TS/TFS/TCS/QES hardcode `secure = False` in their MinIO client,
                 # so they talk plain HTTP to MinIO. The internal MinIO ingress is HTTPS-only and
                 # 301-redirects HTTP -> HTTPS; urllib3 strips the Authorization header across that
@@ -299,6 +336,7 @@ stages:
                 build_and_push "$TFS_IMAGE"       "ATTS/TFS"
                 build_and_push "$TCS_IMAGE"       "TCS"
                 build_and_push "$M3U8_IMAGE"      "M3U8-emulator"
+                build_and_push "$QES_IMAGE"       "QES"
 
                 # MinIO bucket-init image is built from THIS (kdai-infra) repo's pipeline-overrides,
                 # not from KDAI-services.
@@ -930,6 +968,96 @@ stages:
                 fi
                 az containerapp show --name "$TCS_APP" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1 \
                   || { echo "##[error]TCS app '$TCS_APP' does not exist after deploy."; exit 1; }
+
+          - task: AzureCLI@2
+            displayName: Deploy QES (question extraction via Azure OpenAI)
+            env:
+              RESOURCE_GROUP: $(RESOURCE_GROUP)
+              CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
+              IMAGE_TAG: $(Build.BuildId)
+              QES_APP: $(QES_APP)
+              QES_IMAGE: $(QES_IMAGE)
+              REDIS_APP: $(REDIS_APP)
+              MINIO_APP: $(MINIO_APP)
+              BACKEND_APP: $(BACKEND_APP)
+              MINIO_ROOT_USER: $(MINIO_ROOT_USER)
+              MINIO_ROOT_PASSWORD: $(MINIO_ROOT_PASSWORD)
+              STATIC_API_KEY: $(STATIC_API_KEY)
+              AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
+              AZURE_OPENAI_KEY: $(AZURE_OPENAI_KEY)
+              AZURE_OPENAI_DEPLOYMENT: $(AZURE_OPENAI_DEPLOYMENT)
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                # QES extracts questions from each CONFIRMED segment (TCS rpush-es qes_queue when a
+                # reviewer saves a correction) using Azure OpenAI, then posts them to the backend
+                # (Bearer STATIC_API_KEY) -> DebateQuestionAddedEvent -> frontend questions.<debateID>
+                # channel. Internal-only and NOT part of the Conductor health check, so it can never
+                # block transcription. Requires an Azure OpenAI resource + chat model deployment and
+                # AZURE_OPENAI_* in the kdai-secrets variable group.
+                # Skip (do not fail) if the Azure OpenAI secrets aren't set yet, so enabling QES
+                # never blocks the rest of the deploy. Add them to kdai-secrets to activate questions.
+                MISSING=""
+                for v in AZURE_OPENAI_ENDPOINT AZURE_OPENAI_KEY AZURE_OPENAI_DEPLOYMENT; do
+                  case "${!v}" in ""|'$('*) MISSING="$MISSING $v" ;; esac
+                done
+                if [ -n "$MISSING" ]; then
+                  echo "##[warning]Skipping QES (questions) deploy: missing secret(s)$MISSING in the kdai-secrets variable group. Create an Azure OpenAI resource + chat model deployment and add them to activate questions. Transcription is unaffected."
+                  exit 0
+                fi
+                ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
+                [ -n "$ACR_LOGIN_SERVER" ] || { echo "##[error]No ACR found in resource group $RESOURCE_GROUP"; exit 1; }
+                ENV_DOMAIN=$(az containerapp env show --name "$CONTAINER_APP_ENV" --resource-group "$RESOURCE_GROUP" --query properties.defaultDomain -o tsv)
+                [ -n "$ENV_DOMAIN" ] || { echo "##[error]Could not resolve default domain for Container Apps env $CONTAINER_APP_ENV"; exit 1; }
+                BACKEND_FQDN="${BACKEND_APP}.${ENV_DOMAIN}"
+                # TCP services (Redis/Postgres) must be reached by SHORT app name; the long
+                # .internal.<domain> FQDN resolves to the HTTP ingress LB, which does not serve TCP.
+                REDIS_URL="redis://${REDIS_APP}:6379/0"
+                MINIO_HOST="${MINIO_APP}.internal.${ENV_DOMAIN}"
+
+                ENV_VARS=( \
+                  "QES_DOCKER_PORT=7100" \
+                  "REDIS_URL=${REDIS_URL}" \
+                  "MINIO_HOST=${MINIO_HOST}" \
+                  "MINIO_DEBATE_BUCKET_NAME=debates" \
+                  "MINIO_PRESIGNED_URL_EXPIRATION=500" \
+                  "MINIO_SECURE=True" \
+                  "MINIO_QES_USER=secretref:minio-user" \
+                  "MINIO_QES_PASSWORD=secretref:minio-password" \
+                  "BACKEND_QES_RESULT_URL=https://${BACKEND_FQDN}/api/debate/question" \
+                  "BACKEND_QES_ERROR_URL=https://${BACKEND_FQDN}/api/debate/question/error" \
+                  "STATIC_API_KEY=secretref:static-api-key" \
+                  "AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}" \
+                  "AZURE_OPENAI_DEPLOYMENT=${AZURE_OPENAI_DEPLOYMENT}" \
+                  "AZURE_OPENAI_API_VERSION=2024-06-01" \
+                  "AZURE_OPENAI_KEY=secretref:azure-openai-key" )
+                SECRETS=( \
+                  "minio-user=${MINIO_ROOT_USER}" \
+                  "minio-password=${MINIO_ROOT_PASSWORD}" \
+                  "static-api-key=${STATIC_API_KEY}" \
+                  "azure-openai-key=${AZURE_OPENAI_KEY}" )
+
+                if az containerapp show --name "$QES_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
+                  az containerapp secret set --name "$QES_APP" --resource-group "$RESOURCE_GROUP" --secrets "${SECRETS[@]}"
+                  az containerapp registry set --name "$QES_APP" --resource-group "$RESOURCE_GROUP" --server "$ACR_LOGIN_SERVER" --identity system
+                  az containerapp ingress enable --name "$QES_APP" --resource-group "$RESOURCE_GROUP" --type internal --target-port 7100 --transport auto 2>/dev/null || true
+                  az containerapp update --name "$QES_APP" --resource-group "$RESOURCE_GROUP" \
+                    --image "$ACR_LOGIN_SERVER/$QES_IMAGE:$IMAGE_TAG" --min-replicas 1 \
+                    --set-env-vars "${ENV_VARS[@]}"
+                else
+                  az containerapp create --name "$QES_APP" --resource-group "$RESOURCE_GROUP" \
+                    --environment "$CONTAINER_APP_ENV" \
+                    --image "$ACR_LOGIN_SERVER/$QES_IMAGE:$IMAGE_TAG" \
+                    --registry-server "$ACR_LOGIN_SERVER" --registry-identity system \
+                    --ingress internal --target-port 7100 --transport auto \
+                    --secrets "${SECRETS[@]}" \
+                    --env-vars "${ENV_VARS[@]}" \
+                    --cpu 0.5 --memory 1.0Gi --min-replicas 1 --max-replicas 1
+                fi
+                az containerapp show --name "$QES_APP" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1 \
+                  || { echo "##[error]QES app '$QES_APP' does not exist after deploy."; exit 1; }
 
           - task: AzureCLI@2
             displayName: Deploy Reverb (websocket server)
