@@ -133,6 +133,20 @@ stages:
                 # places it at /app/serve.sh where the overridden supervisord.conf invokes it.
                 cp "$OVERRIDE_ROOT/backend/serve.sh" "$(Build.SourcesDirectory)/KDAI-backend/serve.sh"
 
+                # PIPELINE OVERRIDE (app repo is read-only): make debate-user-role assignment
+                # idempotent. createDebateUserRole() loops over the payload doing a plain ->create()
+                # per row, so a duplicate (debate_id, user_id, role_id) in the request — e.g. the
+                # creator assigned the same role twice — hits the `debate_user_role_unique`
+                # constraint (SQLSTATE 23505) and returns 409 "Resource already exists.", which
+                # aborts debate creation. firstOrCreate() matches on the given columns first, so a
+                # duplicate becomes a no-op (returns the existing row) instead of a fatal error.
+                DUR_REPO="$(Build.SourcesDirectory)/KDAI-backend/app/Repositories/DebateRepositories/DebateUserRoleRepository.php"
+                if [ -f "$DUR_REPO" ]; then
+                  sed -i 's/DebateUserRole::query()->create(/DebateUserRole::query()->firstOrCreate(/' "$DUR_REPO"
+                else
+                  echo "##[warning]DebateUserRoleRepository.php not found; skipped the idempotent-insert patch"
+                fi
+
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
                 az acr login --name "${ACR_LOGIN_SERVER%%.*}"
                 docker build \
@@ -721,6 +735,7 @@ stages:
                       "MINIO_BUCKET=debates" \
                       "APP_KEY=secretref:app-key" \
                       "STATIC_API_KEY=secretref:static-api-key" \
+                      "LOG_CHANNEL=stderr" \
                       "ATTS_HEALTH_URL=${CONDUCTOR_URL}/health/all" \
                       "START_TRANSCRIPTION_URL=${CONDUCTOR_URL}/start-capture" \
                       "STOP_TRANSCRIPTION_URL=${CONDUCTOR_URL}/stop-capture" \
@@ -753,6 +768,7 @@ stages:
                       "MINIO_BUCKET=debates" \
                       "APP_KEY=secretref:app-key" \
                       "STATIC_API_KEY=secretref:static-api-key" \
+                      "LOG_CHANNEL=stderr" \
                       "ATTS_HEALTH_URL=${CONDUCTOR_URL}/health/all" \
                       "START_TRANSCRIPTION_URL=${CONDUCTOR_URL}/start-capture" \
                       "STOP_TRANSCRIPTION_URL=${CONDUCTOR_URL}/stop-capture" \
