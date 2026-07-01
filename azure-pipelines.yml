@@ -583,13 +583,18 @@ stages:
                 # The "Debat emulator" serves a looping fake HLS stream on :2121 (nginx + ffmpeg
                 # over debat-sample.mp3). When the emulator is toggled ON in App Management, the
                 # backend points transcription at http://kdai-m3u8-emulator:2121/hls/stream.m3u8
-                # (hardcoded host), which CSP fetches. The app MUST be named exactly
-                # "kdai-m3u8-emulator" so CSP's short-name lookup resolves to it.
+                # (hardcoded host + port), which CSP fetches. The app MUST be named exactly
+                # "kdai-m3u8-emulator" so CSP's short-name lookup resolves to it, and it MUST use
+                # TCP ingress (like Redis) so that :2121 is actually served — an HTTP/"auto"
+                # ingress only answers on 80/443, so CSP's fetch to :2121 would hang/refuse.
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
                 [ -n "$ACR_LOGIN_SERVER" ] || { echo "##[error]No ACR found in resource group $RESOURCE_GROUP"; exit 1; }
                 if az containerapp show --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
                   az containerapp registry set --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" --server "$ACR_LOGIN_SERVER" --identity system
-                  az containerapp ingress enable --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" --type internal --target-port 2121 --transport auto 2>/dev/null || true
+                  # Disable ingress first so an app previously created with HTTP ingress is
+                  # cleanly re-enabled as TCP (switching transport in place is unreliable).
+                  az containerapp ingress disable --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1 || true
+                  az containerapp ingress enable --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" --type internal --target-port 2121 --transport tcp
                   az containerapp update --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" \
                     --image "$ACR_LOGIN_SERVER/$M3U8_IMAGE:$IMAGE_TAG" --min-replicas 1 \
                     --set-env-vars "USE_INTERNAL_M3U8_STREAMING=true"
@@ -598,7 +603,7 @@ stages:
                     --environment "$CONTAINER_APP_ENV" \
                     --image "$ACR_LOGIN_SERVER/$M3U8_IMAGE:$IMAGE_TAG" \
                     --registry-server "$ACR_LOGIN_SERVER" --registry-identity system \
-                    --ingress internal --target-port 2121 --transport auto \
+                    --ingress internal --target-port 2121 --transport tcp \
                     --env-vars "USE_INTERNAL_M3U8_STREAMING=true" \
                     --cpu 0.5 --memory 1.0Gi --min-replicas 1 --max-replicas 1
                 fi
