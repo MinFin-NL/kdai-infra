@@ -255,6 +255,16 @@ stages:
                 cp "$TS_OVR/app/config.py"           "$SRC/ATTS/TS/app/config.py"
                 cp "$TS_OVR/requirements.txt"        "$SRC/ATTS/TS/requirements.txt"
 
+                # PIPELINE OVERRIDE: TS/TFS/TCS/QES hardcode `secure = False` in their MinIO client,
+                # so they talk plain HTTP to MinIO. The internal MinIO ingress is HTTPS-only and
+                # 301-redirects HTTP -> HTTPS; urllib3 strips the Authorization header across that
+                # scheme/port change, so every upload fails with S3 "AccessDenied" (presigned GETs
+                # survive because their auth is in the query string, which is why TS can read audio
+                # but never store a transcript -> no segments -> no live messages). Force TLS so no
+                # redirect happens. Matches the backend (MINIO_ENDPOINT=https) and MINIO_SECURE=True.
+                # CSP already derives `secure` from config, so its line has no `= False` to match.
+                find "$SRC" -name minio_service.py -exec sed -i 's/secure *= *False/secure = True/' {} +
+
                 build_and_push "$CONDUCTOR_IMAGE" "ATTS/Conductor"
                 build_and_push "$CSP_IMAGE"       "ATTS/CSP"
                 build_and_push "$TS_IMAGE"        "ATTS/TS"
