@@ -279,6 +279,16 @@ stages:
                 # CSP already derives `secure` from config, so its line has no `= False` to match.
                 find "$SRC" -name minio_service.py -exec sed -i 's/secure *= *False/secure = True/' {} +
 
+                # PIPELINE OVERRIDE: the services create a bare `redis.Redis.from_url(...)` with no
+                # keepalive, so the long-lived (often blocking) consumer connections sit idle and the
+                # Container Apps TCP ingress closes them -> "Connection closed by server" crashes the
+                # worker's _enqueue_jobs thread and it stops consuming. Enable TCP keepalive with a
+                # short idle so probes keep the connection active through the ingress, plus an app-level
+                # health check that transparently reconnects a dropped connection. The
+                # socket_keepalive_options keys are the Linux TCP_KEEPIDLE(4)/KEEPINTVL(5)/KEEPCNT(6)
+                # constants written as literals, so no `import socket` has to be added to each file.
+                find "$SRC" -name "*.py" -exec sed -i 's/redis\.Redis\.from_url(CONFIG\["REDIS_URL"\])/redis.Redis.from_url(CONFIG["REDIS_URL"], socket_keepalive=True, socket_keepalive_options={4: 60, 5: 30, 6: 3}, health_check_interval=30)/' {} +
+
                 build_and_push "$CONDUCTOR_IMAGE" "ATTS/Conductor"
                 build_and_push "$CSP_IMAGE"       "ATTS/CSP"
                 build_and_push "$TS_IMAGE"        "ATTS/TS"
