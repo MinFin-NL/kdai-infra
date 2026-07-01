@@ -180,19 +180,21 @@ stages:
                   echo "VITE_REVERB_SCHEME=https"
                 } > "$(Build.SourcesDirectory)/KDAI-frontend/.env"
 
-                # PIPELINE OVERRIDE (frontend repo is read-only): the Echo client in
-                # DebateTranscript.vue hardcodes plain-ws (forceTLS:false), which cannot connect
-                # through the Container Apps ingress (wss/443). Patch it in place with targeted,
-                # idempotent edits before the bundle is built. Warns (does not fail) if the file
-                # moves upstream, so the rest of the build still succeeds.
-                ECHO_VUE="$(Build.SourcesDirectory)/KDAI-frontend/src/views/debate/DebateTranscript.vue"
-                if [ -f "$ECHO_VUE" ]; then
-                  sed -i "s/forceTLS: false,/forceTLS: true,/" "$ECHO_VUE"
-                  sed -i "s/enabledTransports: \['ws'\],/enabledTransports: ['ws', 'wss'],/" "$ECHO_VUE"
-                  grep -q "wssPort:" "$ECHO_VUE" || sed -i "s|wsPort: import.meta.env.VITE_REVERB_PORT,|wsPort: import.meta.env.VITE_REVERB_PORT,\n                wssPort: import.meta.env.VITE_REVERB_PORT,|" "$ECHO_VUE"
-                else
-                  echo "##[warning]DebateTranscript.vue not found at the expected path; skipped the Echo wss patch"
-                fi
+                # PIPELINE OVERRIDE (frontend repo is read-only): the Echo client in BOTH
+                # DebateTranscript.vue and DebateQuestions.vue hardcodes plain-ws (forceTLS:false),
+                # which cannot connect through the Container Apps ingress (wss/443). Patch each in
+                # place with targeted, idempotent edits before the bundle is built. Warns (does not
+                # fail) if a file moves upstream, so the rest of the build still succeeds.
+                FRONTEND_VIEWS="$(Build.SourcesDirectory)/KDAI-frontend/src/views/debate"
+                for ECHO_VUE in "$FRONTEND_VIEWS/DebateTranscript.vue" "$FRONTEND_VIEWS/DebateQuestions.vue"; do
+                  if [ -f "$ECHO_VUE" ]; then
+                    sed -i "s/forceTLS: false,/forceTLS: true,/" "$ECHO_VUE"
+                    sed -i "s/enabledTransports: \['ws'\],/enabledTransports: ['ws', 'wss'],/" "$ECHO_VUE"
+                    grep -q "wssPort:" "$ECHO_VUE" || sed -i "s|wsPort: import.meta.env.VITE_REVERB_PORT,|wsPort: import.meta.env.VITE_REVERB_PORT,\n                wssPort: import.meta.env.VITE_REVERB_PORT,|" "$ECHO_VUE"
+                  else
+                    echo "##[warning]$(basename "$ECHO_VUE") not found at the expected path; skipped the Echo wss patch"
+                  fi
+                done
 
                 docker build \
                   -t "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:$IMAGE_TAG" \
