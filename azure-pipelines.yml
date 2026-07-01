@@ -279,15 +279,19 @@ stages:
                 # CSP already derives `secure` from config, so its line has no `= False` to match.
                 find "$SRC" -name minio_service.py -exec sed -i 's/secure *= *False/secure = True/' {} +
 
-                # PIPELINE OVERRIDE: the services create a bare `redis.Redis.from_url(...)` with no
-                # keepalive, so the long-lived (often blocking) consumer connections sit idle and the
-                # Container Apps TCP ingress closes them -> "Connection closed by server" crashes the
-                # worker's _enqueue_jobs thread and it stops consuming. Enable TCP keepalive with a
-                # short idle so probes keep the connection active through the ingress, plus an app-level
-                # health check that transparently reconnects a dropped connection. The
-                # socket_keepalive_options keys are the Linux TCP_KEEPIDLE(4)/KEEPINTVL(5)/KEEPCNT(6)
-                # constants written as literals, so no `import socket` has to be added to each file.
-                find "$SRC" -name "*.py" -exec sed -i 's/redis\.Redis\.from_url(CONFIG\["REDIS_URL"\])/redis.Redis.from_url(CONFIG["REDIS_URL"], socket_keepalive=True, socket_keepalive_options={4: 60, 5: 30, 6: 3}, health_check_interval=30)/' {} +
+                # PIPELINE OVERRIDE: the services create a bare `redis.Redis.from_url(...)`; the
+                # long-lived blocking consumer connections (blpop) sit idle and the Container Apps
+                # ingress (envoy) closes them after ~6 min. envoy's idle timeout counts APPLICATION
+                # bytes, so kernel TCP keepalive does NOT prevent it, and the worker loops issue the
+                # blocking read OUTSIDE their try/except, so the resulting ConnectionError kills the
+                # consumer thread for good ("Connection closed by server" -> pipeline silently stalls).
+                # Fix: configure redis-py to retry ConnectionError/TimeoutError with unlimited retries
+                # (-1) so it transparently reconnects and re-issues the blocking read instead of the
+                # thread dying. TCP keepalive is kept too (harmless); the socket_keepalive_options keys
+                # are the Linux TCP_KEEPIDLE(4)/KEEPINTVL(5)/KEEPCNT(6) constants as literals, and
+                # redis.retry.Retry / redis.backoff.ExponentialBackoff resolve after `import redis`
+                # (verified against redis 5.2.1) so no extra imports are needed.
+                find "$SRC" -name "*.py" -exec sed -i 's/redis\.Redis\.from_url(CONFIG\["REDIS_URL"\])/redis.Redis.from_url(CONFIG["REDIS_URL"], socket_keepalive=True, socket_keepalive_options={4: 60, 5: 30, 6: 3}, health_check_interval=30, retry=redis.retry.Retry(redis.backoff.ExponentialBackoff(cap=10, base=1), -1), retry_on_error=[redis.exceptions.ConnectionError, redis.exceptions.TimeoutError])/' {} +
 
                 build_and_push "$CONDUCTOR_IMAGE" "ATTS/Conductor"
                 build_and_push "$CSP_IMAGE"       "ATTS/CSP"
