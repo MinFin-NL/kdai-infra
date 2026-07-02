@@ -985,7 +985,9 @@ stages:
               STATIC_API_KEY: $(STATIC_API_KEY)
               AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
               AZURE_OPENAI_KEY: $(AZURE_OPENAI_KEY)
-              AZURE_OPENAI_DEPLOYMENT: $(AZURE_OPENAI_DEPLOYMENT)
+              # Hardcoded (same pattern as the invulhulp pipeline): the model deployment on
+              # oai-kdai-inno-d, kept in lockstep with invulhulp's (gpt-chat-latest v2026-05-05).
+              AZURE_OPENAI_DEPLOYMENT: gpt-5.3-chat
             inputs:
               azureSubscription: $(AZURE_SERVICE_CONNECTION)
               scriptType: bash
@@ -1031,7 +1033,7 @@ stages:
                   "STATIC_API_KEY=secretref:static-api-key" \
                   "AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}" \
                   "AZURE_OPENAI_DEPLOYMENT=${AZURE_OPENAI_DEPLOYMENT}" \
-                  "AZURE_OPENAI_API_VERSION=2024-06-01" \
+                  "AZURE_OPENAI_API_VERSION=2025-04-01-preview" \
                   "AZURE_OPENAI_KEY=secretref:azure-openai-key" )
                 SECRETS=( \
                   "minio-user=${MINIO_ROOT_USER}" \

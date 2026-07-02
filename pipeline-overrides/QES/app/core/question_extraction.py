@@ -110,19 +110,26 @@ class QuestionExtraction:
                 - ...
             """
 
-            response = requests.post(
-                url,
-                headers={
-                    "api-key": CONFIG["AZURE_OPENAI_KEY"],
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0,
-                    "max_tokens": 800,
-                },
-                timeout=60,
-            )
+            headers = {
+                "api-key": CONFIG["AZURE_OPENAI_KEY"],
+                "Content-Type": "application/json",
+            }
+            # gpt-5.3-chat (gpt-chat-latest) renamed `max_tokens` to `max_completion_tokens`
+            # and rejects `temperature` != 1, so no temperature is sent (verified against the
+            # live deployment). The 400 retry below strips any parameter a future model swap
+            # rejects, so it never fails the segment (mirrors invulhulp's llm.py fallback).
+            payload = {
+                "messages": [{"role": "user", "content": prompt}],
+                "max_completion_tokens": 800,
+            }
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            if response.status_code == 400:
+                LOGGER.warning(
+                    f"Azure OpenAI rejected the request ({response.text}); retrying with a minimal payload"
+                )
+                response = requests.post(
+                    url, headers=headers, json={"messages": payload["messages"]}, timeout=60
+                )
 
             if response.status_code != 200:
                 raise NotificationException(
