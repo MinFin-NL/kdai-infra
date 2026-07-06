@@ -8,3 +8,4 @@ kdai-docs/
 kdai-services/
 
 CLAUDE.md
+__pycache__/

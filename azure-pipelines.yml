@@ -230,7 +230,10 @@ stages:
                 # M3U8 emulator (test stream)
                 build_push "$M3U8_IMAGE" "$KDAI3/services/M3U8-emulator"
 
-                # MinIO init job (bucket + per-service users/policies)
+                # MinIO init job (bucket + per-service users/policies).
+                # Normalize CRLF on the agent — the mc image has no sed (ubi-micro),
+                # and a CRLF script is the known kdai3 Windows-checkout failure mode.
+                sed -i 's/\r$//' "$KDAI3/_storage/minio_setup/init_minio.sh"
                 build_push "$MINIO_INIT_IMAGE" -f "$OVERRIDE_ROOT/minio-init/Dockerfile" "$KDAI3/_storage/minio_setup"
 
   - stage: Deploy
