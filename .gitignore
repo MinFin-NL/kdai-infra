@@ -1,5 +1,7 @@
 .idea/
 
+# Local reference checkouts (the pipeline pulls its own copy of kdai3 from GitHub)
+kdai3/
 kdai-frontend/
 kdai-backend/
 kdai-docs/

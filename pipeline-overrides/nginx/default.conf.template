@@ -1,0 +1,59 @@
+# Substituted at container start by the nginx image's envsubst entrypoint.
+# Only ${BACKEND_FASTCGI}, ${REVERB_UPSTREAM} and ${FRONTEND_UPSTREAM} are env
+# vars; $-variables like $http_upgrade are nginx runtime vars and are left alone
+# (the entrypoint only substitutes variables that exist in the environment).
+server {
+    listen 80;
+    server_name _;
+
+    client_max_body_size 100M;
+
+    # API routes - Laravel via PHP-FPM (fastcgi over the backend's TCP ingress)
+    location /api/ {
+        fastcgi_pass ${BACKEND_FASTCGI};
+        fastcgi_index index.php;
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME /app/public/index.php;
+        fastcgi_param SCRIPT_NAME /index.php;
+        fastcgi_param REQUEST_URI $uri?$args;
+        # TLS is terminated by Container Apps ingress; tell Laravel it is https.
+        fastcgi_param HTTPS on;
+        fastcgi_read_timeout 300s;
+        fastcgi_connect_timeout 75s;
+        fastcgi_send_timeout 300s;
+    }
+
+    # WebSocket (Reverb) — proxied to the Reverb app's internal https ingress.
+    # No Host override: nginx sets Host to the upstream FQDN ($proxy_host),
+    # which Container Apps envoy needs for routing.
+    location /app/ {
+        proxy_pass ${REVERB_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_ssl_server_name on;
+        proxy_read_timeout 86400;
+        proxy_buffering off;
+    }
+
+    # Health check
+    location /health {
+        access_log off;
+        return 200 "healthy\n";
+        add_header Content-Type text/plain;
+    }
+
+    # Frontend SPA — proxied to the frontend app's internal https ingress.
+    location / {
+        proxy_pass ${FRONTEND_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_ssl_server_name on;
+    }
+}

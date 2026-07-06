@@ -3,23 +3,13 @@ trigger:
     include:
       - main
 
-# GitHub service connection must be created in Azure DevOps:
-# Project Settings → Service connections → New → GitHub → name it "github-kdai"
+# GitHub service connection must exist in Azure DevOps:
+# Project Settings → Service connections → GitHub → "github-kdai"
 resources:
   repositories:
-    - repository: KDAI-backend
+    - repository: kdai3
       type: github
-      name: W-KDAI/KDAI-backend
-      ref: refs/heads/main
-      endpoint: github-kdai
-    - repository: KDAI-frontend
-      type: github
-      name: W-KDAI/KDAI-frontend
-      ref: refs/heads/main
-      endpoint: github-kdai
-    - repository: KDAI-services
-      type: github
-      name: W-KDAI/KDAI-services
+      name: W-KDAI/kdai3
       ref: refs/heads/main
       endpoint: github-kdai
 
@@ -28,63 +18,54 @@ pool:
 
 variables:
   - group: kdai-secrets
-  - name: BACKEND_IMAGE
-    value: kdai-backend
-  - name: FRONTEND_IMAGE
-    value: kdai-frontend
   - name: RESOURCE_GROUP
     value: rg-kdai-inno-d
   - name: CONTAINER_APP_ENV
     value: cae-kdai-inno-d
-  - name: BACKEND_APP
-    value: ca-kdai-backend-inno-d
-  - name: FRONTEND_APP
-    value: ca-kdai-frontend-inno-d
+  # --- images ---
+  - name: BACKEND_IMAGE
+    value: kdai-backend
+  - name: REVERB_IMAGE
+    value: kdai-reverb
+  - name: FRONTEND_IMAGE
+    value: kdai-frontend
+  - name: NGINX_IMAGE
+    value: kdai-nginx
+  - name: CSP_IMAGE
+    value: kdai-atts-csp
+  - name: WHISPERLIVE_IMAGE
+    value: kdai-whisperlive
+  - name: M3U8_IMAGE
+    value: kdai-m3u8-emulator
+  - name: MINIO_INIT_IMAGE
+    value: kdai-minio-init
+  # --- container apps ---
   - name: POSTGRES_APP
     value: ca-kdai-postgres-inno-d
   - name: MINIO_APP
     value: ca-kdai-minio-inno-d
-  # --- Transcription engine (ATTS) + Reverb websocket server ---
+  - name: MINIO_INIT_JOB
+    value: ca-kdai-minio-init
   - name: REDIS_APP
     value: ca-kdai-redis-inno-d
-  - name: CONDUCTOR_APP
-    value: ca-kdai-atts-conductor-inno-d
+  - name: WHISPERLIVE_APP
+    value: ca-kdai-whisperlive-inno-d
   - name: CSP_APP
     value: ca-kdai-atts-csp-inno-d
-  - name: TS_APP
-    value: ca-kdai-atts-ts-inno-d
-  - name: TFS_APP
-    value: ca-kdai-atts-tfs-inno-d
-  - name: TCS_APP
-    value: ca-kdai-tcs-inno-d
-  - name: QES_APP
-    value: ca-kdai-qes-inno-d
+  - name: M3U8_APP
+    value: ca-kdai-m3u8-emulator-inno-d
+  - name: BACKEND_APP
+    value: ca-kdai-backend-inno-d
+  - name: FRONTEND_APP
+    value: ca-kdai-frontend-inno-d
   - name: REVERB_APP
     value: ca-kdai-reverb-inno-d
-  - name: CONDUCTOR_IMAGE
-    value: kdai-atts-conductor
-  - name: CSP_IMAGE
-    value: kdai-atts-csp
-  - name: TS_IMAGE
-    value: kdai-atts-ts
-  - name: TFS_IMAGE
-    value: kdai-atts-tfs
-  - name: TCS_IMAGE
-    value: kdai-tcs
-  - name: QES_IMAGE
-    value: kdai-qes
-  # Debat emulator: the backend hardcodes the host "kdai-m3u8-emulator", so the Container
-  # App MUST be named exactly that (not the ca-...-inno-d convention) for short-name lookup.
-  - name: M3U8_APP
-    value: kdai-m3u8-emulator
-  - name: M3U8_IMAGE
-    value: kdai-m3u8-emulator
-  # Always-on helper app that ensures the MinIO "debates" bucket exists
-  - name: MINIO_INIT_IMAGE
-    value: kdai-minio-init
-  - name: MINIO_INIT_APP
-    value: ca-kdai-minio-init
-
+  - name: NGINX_APP
+    value: ca-kdai-nginx-inno-d
+  # Azure OpenAI chat deployment used as the LLM (questions/answer-suggestions).
+  # Kept in lockstep with the invulhulp app; lives on oai-kdai-inno-d.
+  - name: LLM_MODEL_DEPLOYMENT
+    value: gpt-5.3-chat
 
 stages:
   - stage: Build
@@ -94,88 +75,73 @@ stages:
         displayName: Docker build and push to ACR
         steps:
           - checkout: self
-          - checkout: KDAI-backend
-          - checkout: KDAI-frontend
-          - checkout: KDAI-services
+          - checkout: kdai3
 
           - task: AzureCLI@2
-            displayName: Build and push backend
+            displayName: Build and push backend (+ reverb variant)
             env:
               IMAGE_TAG: $(Build.BuildId)
               BACKEND_IMAGE: $(BACKEND_IMAGE)
+              REVERB_IMAGE: $(REVERB_IMAGE)
               RESOURCE_GROUP: $(RESOURCE_GROUP)
+              GITHUB_TOKEN: $(GITHUB_TOKEN)
             inputs:
               azureSubscription: $(AZURE_SERVICE_CONNECTION)
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
-                # HOTFIX: The KDAI-backend Dockerfile runs `php artisan key:generate` during the
-                # image build, but does not ensure a .env file exists beforehand. Laravel's
-                # key:generate command requires an existing .env file to write the APP_KEY into,
-                # so the build fails with "Failed to open stream: No such file or directory".
-                #
-                # The permanent fix is to add `RUN cp .env.example .env` (or `RUN touch .env`)
-                # to the KDAI-backend Dockerfile before the key:generate step. Until that change
-                # is made upstream, we create a minimal placeholder .env here so the file exists
-                # in the Docker build context when the COPY step runs.
-                #
-                # The APP_KEY written here is a temporary value; the real key must be injected
-                # at runtime via the Container App environment variable, which overrides the
-                # value baked into the image.
-                echo "APP_KEY=" > "$(Build.SourcesDirectory)/KDAI-backend/.env"
+                set -e
+                SRC="$(Build.SourcesDirectory)/kdai3/backend"
+                [ -d "$SRC" ] || { echo "##[error]kdai3/backend not found in checkout"; exit 1; }
 
-                # PIPELINE OVERRIDE (app repo is read-only): replace supervisord.conf with one that
-                # runs `php artisan config:cache` at startup. PHP's built-in `artisan serve` web
-                # server does not expose Container App env vars to Laravel's env(), so without a
-                # config cache the web process falls back to defaults (DB_CONNECTION=sqlite). The
-                # CLI config:cache reads the env correctly and bakes it for the web/queue processes.
-                OVERRIDE_ROOT=$(find "$(Build.SourcesDirectory)" -maxdepth 4 -type d -name pipeline-overrides | head -1)
-                [ -n "$OVERRIDE_ROOT" ] || { echo "##[error]pipeline-overrides dir not found under sources"; exit 1; }
-                cp "$OVERRIDE_ROOT/backend/supervisord.conf" "$(Build.SourcesDirectory)/KDAI-backend/supervisord.conf"
-                # serve.sh runs PHP's built-in server directly (full env inheritance) so the
-                # transcription getenv() vars reach the request handler; Dockerfile COPY . /app
-                # places it at /app/serve.sh where the overridden supervisord.conf invokes it.
-                cp "$OVERRIDE_ROOT/backend/serve.sh" "$(Build.SourcesDirectory)/KDAI-backend/serve.sh"
-
-                # PIPELINE OVERRIDE (app repo is read-only): make debate-user-role assignment
-                # idempotent. createDebateUserRole() loops over the payload doing a plain ->create()
-                # per row, so a duplicate (debate_id, user_id, role_id) in the request — e.g. the
-                # creator assigned the same role twice — hits the `debate_user_role_unique`
-                # constraint (SQLSTATE 23505) and returns 409 "Resource already exists.", which
-                # aborts debate creation. firstOrCreate() matches on the given columns first, so a
-                # duplicate becomes a no-op (returns the existing row) instead of a fatal error.
-                DUR_REPO="$(Build.SourcesDirectory)/KDAI-backend/app/Repositories/DebateRepositories/DebateUserRoleRepository.php"
-                if [ -f "$DUR_REPO" ]; then
-                  sed -i 's/DebateUserRole::query()->create(/DebateUserRole::query()->firstOrCreate(/' "$DUR_REPO"
+                # PIPELINE PATCH (app repo is read-only): the QES job sends the LLM key as
+                # 'Authorization: Token <key>' (VLAM convention). Azure OpenAI's
+                # OpenAI-compatible endpoint requires 'Bearer'. Idempotent sed.
+                QES_JOB="$SRC/app/Jobs/ProcessQuestionExtractionJob.php"
+                if [ -f "$QES_JOB" ]; then
+                  sed -i "s/'Token '\./'Bearer './" "$QES_JOB"
                 else
-                  echo "##[warning]DebateUserRoleRepository.php not found; skipped the idempotent-insert patch"
+                  echo "##[warning]ProcessQuestionExtractionJob.php not found; skipped Bearer patch"
                 fi
 
-                # PIPELINE OVERRIDE (app repo is read-only): make the live transcript recoverable.
-                # (1) getFullTranscript rebuilds the transcript from every per-segment file, so a
-                # browser that reconnects/refreshes reloads the whole transcript-so-far from MinIO
-                # instead of showing an empty panel (previously it only read TCS's full_transcript.txt,
-                # which holds only reviewer-confirmed segments). (2) MinIOService.listFiles must be
-                # recursive for that (per-segment files are nested under transcripts/<segment>/), and
-                # it has no other caller, so switch files() -> allFiles().
-                BE_SRC="$(Build.SourcesDirectory)/KDAI-backend"
-                cp "$OVERRIDE_ROOT/backend/app/Http/Controllers/DebateControllers/DebateTranscriptController.php" \
-                   "$BE_SRC/app/Http/Controllers/DebateControllers/DebateTranscriptController.php"
-                MINIO_SVC="$BE_SRC/app/Services/MinIOService.php"
-                if [ -f "$MINIO_SVC" ]; then
-                  sed -i 's/->files($directory)/->allFiles($directory)/' "$MINIO_SVC"
-                else
-                  echo "##[warning]MinIOService.php not found; skipped the recursive-list patch"
+                # BUILD HOTFIX: the CCoE pool's unauthenticated GitHub codeload path is
+                # rate-limited, which breaks composer dist downloads. Composer reads a
+                # project-level auth.json from the working dir, so copy one in right
+                # before `composer install` and strip it from the final layer.
+                # (Intermediate layers in the private ACR still contain it — acceptable
+                # for inno-d, the token is the pipeline's own.)
+                if [ -n "$GITHUB_TOKEN" ] && [ "${GITHUB_TOKEN#\$(}" = "$GITHUB_TOKEN" ]; then
+                  printf '{"github-oauth": {"github.com": "%s"}}\n' "$GITHUB_TOKEN" > "$SRC/auth.json"
+                  sed -i 's#^RUN composer install#COPY auth.json ./auth.json\nRUN composer install#' "$SRC/Dockerfile"
+                  printf '\nRUN rm -f /app/auth.json\n' >> "$SRC/Dockerfile"
                 fi
 
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
+                [ -n "$ACR_LOGIN_SERVER" ] || { echo "##[error]No ACR found in $RESOURCE_GROUP"; exit 1; }
                 az acr login --name "${ACR_LOGIN_SERVER%%.*}"
+
                 docker build \
                   -t "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:$IMAGE_TAG" \
                   -t "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:latest" \
-                  $(Build.SourcesDirectory)/KDAI-backend
+                  "$SRC"
                 docker push "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:$IMAGE_TAG"
                 docker push "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:latest"
+
+                # Reverb variant: same code, but runs only the websocket server.
+                # A derived image (instead of a Container Apps command override) because
+                # the az CLI cannot pass command args that start with "--", and because
+                # this must skip docker-entrypoint.sh (no second migrate/seed race).
+                cat > /tmp/Dockerfile.reverb <<EOF
+                FROM $ACR_LOGIN_SERVER/$BACKEND_IMAGE:$IMAGE_TAG
+                ENTRYPOINT []
+                CMD ["php", "artisan", "reverb:start", "--host=0.0.0.0", "--port=8081", "--debug"]
+                EOF
+                docker build -f /tmp/Dockerfile.reverb \
+                  -t "$ACR_LOGIN_SERVER/$REVERB_IMAGE:$IMAGE_TAG" \
+                  -t "$ACR_LOGIN_SERVER/$REVERB_IMAGE:latest" \
+                  "$SRC"
+                docker push "$ACR_LOGIN_SERVER/$REVERB_IMAGE:$IMAGE_TAG"
+                docker push "$ACR_LOGIN_SERVER/$REVERB_IMAGE:latest"
 
           - task: AzureCLI@2
             displayName: Build and push frontend
@@ -183,169 +149,89 @@ stages:
               IMAGE_TAG: $(Build.BuildId)
               FRONTEND_IMAGE: $(FRONTEND_IMAGE)
               RESOURCE_GROUP: $(RESOURCE_GROUP)
-              CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
-              BACKEND_APP: $(BACKEND_APP)
-              REVERB_APP: $(REVERB_APP)
+              REVERB_APP_ID: $(REVERB_APP_ID)
               REVERB_APP_KEY: $(REVERB_APP_KEY)
             inputs:
               azureSubscription: $(AZURE_SERVICE_CONNECTION)
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
+                set -e
+                SRC="$(Build.SourcesDirectory)/kdai3/frontend"
+                [ -d "$SRC" ] || { echo "##[error]kdai3/frontend not found in checkout"; exit 1; }
+                for v in REVERB_APP_ID REVERB_APP_KEY; do
+                  case "${!v}" in
+                    ""|'$('*) echo "##[error]$v is not set in the kdai-secrets variable group"; exit 1 ;;
+                  esac
+                done
+
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
                 az acr login --name "${ACR_LOGIN_SERVER%%.*}"
 
-                # Inject the API base URL at build time WITHOUT modifying the frontend repo.
-                # Vite bakes VITE_* vars into the bundle during `npm run build`, and the
-                # Dockerfile's `COPY . .` picks up this .env (which is git-ignored, so the repo
-                # is untouched). The SPA calls the backend's public ingress directly; the backend
-                # is exposed externally in the Deploy stage. Its external FQDN is deterministic:
-                # <app>.<env-default-domain>.
-                ENV_DOMAIN=$(az containerapp env show --name "$CONTAINER_APP_ENV" --resource-group "$RESOURCE_GROUP" --query properties.defaultDomain -o tsv)
-                [ -n "$ENV_DOMAIN" ] || { echo "##[error]Could not resolve default domain for Container Apps env $CONTAINER_APP_ENV"; exit 1; }
-
-                # Bake the API base URL and the Reverb (websocket) connection details into the
-                # bundle. The Reverb server runs as its own externally-exposed Container App, so
-                # the browser connects over wss on 443 to its deterministic external FQDN.
-                {
-                  echo "VITE_API_BASE_URL=https://${BACKEND_APP}.${ENV_DOMAIN}/api"
-                  echo "VITE_REVERB_APP_KEY=${REVERB_APP_KEY}"
-                  echo "VITE_REVERB_HOST=${REVERB_APP}.${ENV_DOMAIN}"
-                  echo "VITE_REVERB_PORT=443"
-                  echo "VITE_REVERB_SCHEME=https"
-                } > "$(Build.SourcesDirectory)/KDAI-frontend/.env"
-
-                # PIPELINE OVERRIDE (frontend repo is read-only): the Echo client in BOTH
-                # DebateTranscript.vue and DebateQuestions.vue hardcodes plain-ws (forceTLS:false),
-                # which cannot connect through the Container Apps ingress (wss/443). Patch each in
-                # place with targeted, idempotent edits before the bundle is built. Warns (does not
-                # fail) if a file moves upstream, so the rest of the build still succeeds.
-                FRONTEND_VIEWS="$(Build.SourcesDirectory)/KDAI-frontend/src/views/debate"
-                for ECHO_VUE in "$FRONTEND_VIEWS/DebateTranscript.vue" "$FRONTEND_VIEWS/DebateQuestions.vue"; do
-                  if [ -f "$ECHO_VUE" ]; then
-                    sed -i "s/forceTLS: false,/forceTLS: true,/" "$ECHO_VUE"
-                    sed -i "s/enabledTransports: \['ws'\],/enabledTransports: ['ws', 'wss'],/" "$ECHO_VUE"
-                    grep -q "wssPort:" "$ECHO_VUE" || sed -i "s|wsPort: import.meta.env.VITE_REVERB_PORT,|wsPort: import.meta.env.VITE_REVERB_PORT,\n                wssPort: import.meta.env.VITE_REVERB_PORT,|" "$ECHO_VUE"
-                  else
-                    echo "##[warning]$(basename "$ECHO_VUE") not found at the expected path; skipped the Echo wss patch"
-                  fi
-                done
-
-                # PIPELINE OVERRIDE: re-fetch the full transcript whenever the websocket (re)connects,
-                # so a Reverb restart / dropped connection / page refresh reloads the transcript from
-                # the backend instead of leaving the panel empty. Only DebateTranscript.vue has
-                # getFullTranscript(); pusher fires "connected" on the initial connect and every reconnect.
-                TRANSCRIPT_VUE="$FRONTEND_VIEWS/DebateTranscript.vue"
-                if [ -f "$TRANSCRIPT_VUE" ] && ! grep -q 'bind("connected"' "$TRANSCRIPT_VUE"; then
-                  sed -i 's|const channel = this.echoInstance.channel(`transcript.${this.debateID}`);|this.echoInstance.connector.pusher.connection.bind("connected", () => this.getFullTranscript());\n\n            const channel = this.echoInstance.channel(`transcript.${this.debateID}`);|' "$TRANSCRIPT_VUE"
-                fi
-
+                # Everything is same-origin behind the nginx front door:
+                #  - VITE_API_BASE_URL=/api        → axios uses relative URLs
+                #  - VITE_REVERB_HOST=localhost    → echoService falls back to
+                #    location.hostname, so websockets go to wss://<nginx-fqdn>:443/app
                 docker build \
+                  --build-arg VITE_API_BASE_URL=/api \
+                  --build-arg VITE_REVERB_APP_KEY="$REVERB_APP_KEY" \
+                  --build-arg VITE_REVERB_APP_ID="$REVERB_APP_ID" \
+                  --build-arg VITE_REVERB_HOST=localhost \
+                  --build-arg VITE_REVERB_PORT=443 \
+                  --build-arg VITE_REVERB_SCHEME=https \
+                  --build-arg VITE_WS_PATH=/app \
                   -t "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:$IMAGE_TAG" \
                   -t "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:latest" \
-                  $(Build.SourcesDirectory)/KDAI-frontend
+                  "$SRC"
                 docker push "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:$IMAGE_TAG"
                 docker push "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:latest"
 
           - task: AzureCLI@2
-            displayName: Build and push transcription services
+            displayName: Build and push nginx, CSP, whisperlive shim, emulator, minio-init
             env:
               IMAGE_TAG: $(Build.BuildId)
-              RESOURCE_GROUP: $(RESOURCE_GROUP)
-              CONDUCTOR_IMAGE: $(CONDUCTOR_IMAGE)
+              NGINX_IMAGE: $(NGINX_IMAGE)
               CSP_IMAGE: $(CSP_IMAGE)
-              TS_IMAGE: $(TS_IMAGE)
-              TFS_IMAGE: $(TFS_IMAGE)
-              TCS_IMAGE: $(TCS_IMAGE)
+              WHISPERLIVE_IMAGE: $(WHISPERLIVE_IMAGE)
               M3U8_IMAGE: $(M3U8_IMAGE)
-              QES_IMAGE: $(QES_IMAGE)
               MINIO_INIT_IMAGE: $(MINIO_INIT_IMAGE)
+              RESOURCE_GROUP: $(RESOURCE_GROUP)
             inputs:
               azureSubscription: $(AZURE_SERVICE_CONNECTION)
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
-                # Build + push the CPU-only transcription microservices from the KDAI-services
-                # repo. The TS image no longer needs a GPU: WhisperX has been replaced by the
-                # Azure AI Speech SDK (see ATTS/TS code changes). The Ollama LLM and the GPU
-                # bootstrap services from the original docker-compose are intentionally NOT built.
-                ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
-                [ -n "$ACR_LOGIN_SERVER" ] || { echo "##[error]No ACR found in resource group $RESOURCE_GROUP"; exit 1; }
-                az acr login --name "${ACR_LOGIN_SERVER%%.*}"
-
-                SRC="$(Build.SourcesDirectory)/KDAI-services"
-                # image_name => build context (relative to the KDAI-services repo root)
-                build_and_push() {
-                  local image="$1" context="$2"
-                  echo "##[group]Building $image from $context"
-                  docker build \
-                    -t "$ACR_LOGIN_SERVER/$image:$IMAGE_TAG" \
-                    -t "$ACR_LOGIN_SERVER/$image:latest" \
-                    "$SRC/$context"
-                  docker push "$ACR_LOGIN_SERVER/$image:$IMAGE_TAG"
-                  docker push "$ACR_LOGIN_SERVER/$image:latest"
-                  echo "##[endgroup]"
-                }
-
-                # --- PIPELINE OVERRIDE (the app repos are read-only) ---
-                # Replace the TS service's WhisperX/GPU transcriber with an Azure AI Speech
-                # implementation WITHOUT modifying the KDAI-services repo. The replacement files
-                # live in THIS (kdai-infra) repo under pipeline-overrides/ and are copied over the
-                # checked-out copy before the image is built (the Dockerfile's `COPY . .` bakes them
-                # in). This mirrors the existing .env / auth.json overwrite hotfixes.
+                set -e
+                KDAI3="$(Build.SourcesDirectory)/kdai3"
                 OVERRIDE_ROOT=$(find "$(Build.SourcesDirectory)" -maxdepth 4 -type d -name pipeline-overrides | head -1)
                 [ -n "$OVERRIDE_ROOT" ] || { echo "##[error]pipeline-overrides dir not found under sources"; exit 1; }
-                TS_OVR="$OVERRIDE_ROOT/ATTS/TS"
-                cp "$TS_OVR/app/core/transcriber.py" "$SRC/ATTS/TS/app/core/transcriber.py"
-                cp "$TS_OVR/app/config.py"           "$SRC/ATTS/TS/app/config.py"
-                cp "$TS_OVR/requirements.txt"        "$SRC/ATTS/TS/requirements.txt"
 
-                # QES: swap the Ollama LLM call for Azure OpenAI (chat completions REST API), so the
-                # questions feature runs on the managed Azure LLM instead of a local GPU/Ollama.
-                QES_OVR="$OVERRIDE_ROOT/QES"
-                cp "$QES_OVR/app/config.py"                   "$SRC/QES/app/config.py"
-                cp "$QES_OVR/app/core/question_extraction.py" "$SRC/QES/app/core/question_extraction.py"
+                ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
+                az acr login --name "${ACR_LOGIN_SERVER%%.*}"
 
-                # PIPELINE OVERRIDE: TS/TFS/TCS/QES hardcode `secure = False` in their MinIO client,
-                # so they talk plain HTTP to MinIO. The internal MinIO ingress is HTTPS-only and
-                # 301-redirects HTTP -> HTTPS; urllib3 strips the Authorization header across that
-                # scheme/port change, so every upload fails with S3 "AccessDenied" (presigned GETs
-                # survive because their auth is in the query string, which is why TS can read audio
-                # but never store a transcript -> no segments -> no live messages). Force TLS so no
-                # redirect happens. Matches the backend (MINIO_ENDPOINT=https) and MINIO_SECURE=True.
-                # CSP already derives `secure` from config, so its line has no `= False` to match.
-                find "$SRC" -name minio_service.py -exec sed -i 's/secure *= *False/secure = True/' {} +
+                build_push() { # $1=image name, remaining args passed to docker build
+                  local image="$1"; shift
+                  docker build -t "$ACR_LOGIN_SERVER/$image:$IMAGE_TAG" -t "$ACR_LOGIN_SERVER/$image:latest" "$@"
+                  docker push "$ACR_LOGIN_SERVER/$image:$IMAGE_TAG"
+                  docker push "$ACR_LOGIN_SERVER/$image:latest"
+                }
 
-                # PIPELINE OVERRIDE: the services create a bare `redis.Redis.from_url(...)`; the
-                # long-lived blocking consumer connections (blpop) sit idle and the Container Apps
-                # ingress (envoy) closes them after ~6 min. envoy's idle timeout counts APPLICATION
-                # bytes, so kernel TCP keepalive does NOT prevent it, and the worker loops issue the
-                # blocking read OUTSIDE their try/except, so the resulting ConnectionError kills the
-                # consumer thread for good ("Connection closed by server" -> pipeline silently stalls).
-                # Fix: configure redis-py to retry ConnectionError/TimeoutError with unlimited retries
-                # (-1) so it transparently reconnects and re-issues the blocking read instead of the
-                # thread dying. TCP keepalive is kept too (harmless); the socket_keepalive_options keys
-                # are the Linux TCP_KEEPIDLE(4)/KEEPINTVL(5)/KEEPCNT(6) constants as literals, and
-                # redis.retry.Retry / redis.backoff.ExponentialBackoff resolve after `import redis`
-                # (verified against redis 5.2.1) so no extra imports are needed.
-                find "$SRC" -name "*.py" -exec sed -i 's/redis\.Redis\.from_url(CONFIG\["REDIS_URL"\])/redis.Redis.from_url(CONFIG["REDIS_URL"], socket_keepalive=True, socket_keepalive_options={4: 60, 5: 30, 6: 3}, health_check_interval=30, retry=redis.retry.Retry(redis.backoff.ExponentialBackoff(cap=10, base=1), -1), retry_on_error=[redis.exceptions.ConnectionError, redis.exceptions.TimeoutError])/' {} +
+                # nginx front door (infra-owned; envsubst-templated upstreams)
+                build_push "$NGINX_IMAGE" "$OVERRIDE_ROOT/nginx"
 
-                build_and_push "$CONDUCTOR_IMAGE" "ATTS/Conductor"
-                build_and_push "$CSP_IMAGE"       "ATTS/CSP"
-                build_and_push "$TS_IMAGE"        "ATTS/TS"
-                build_and_push "$TFS_IMAGE"       "ATTS/TFS"
-                build_and_push "$TCS_IMAGE"       "TCS"
-                build_and_push "$M3U8_IMAGE"      "M3U8-emulator"
-                build_and_push "$QES_IMAGE"       "QES"
+                # ATTS-CSP straight from the kdai3 repo — no patches needed:
+                # MINIO_SECURE is env-driven and the redis worker reconnects itself.
+                build_push "$CSP_IMAGE" "$KDAI3/services/ATTS-CSP"
 
-                # MinIO bucket-init image is built from THIS (kdai-infra) repo's pipeline-overrides,
-                # not from KDAI-services.
-                docker build \
-                  -t "$ACR_LOGIN_SERVER/$MINIO_INIT_IMAGE:$IMAGE_TAG" \
-                  -t "$ACR_LOGIN_SERVER/$MINIO_INIT_IMAGE:latest" \
-                  "$OVERRIDE_ROOT/minio-init"
-                docker push "$ACR_LOGIN_SERVER/$MINIO_INIT_IMAGE:$IMAGE_TAG"
-                docker push "$ACR_LOGIN_SERVER/$MINIO_INIT_IMAGE:latest"
+                # WhisperLive-protocol shim backed by Azure AI Speech (replaces the
+                # GPU-only ghcr.io/collabora/whisperlive-gpu image, CPU-only env).
+                build_push "$WHISPERLIVE_IMAGE" "$OVERRIDE_ROOT/whisperlive-shim"
+
+                # M3U8 emulator (test stream)
+                build_push "$M3U8_IMAGE" "$KDAI3/services/M3U8-emulator"
+
+                # MinIO init job (bucket + per-service users/policies)
+                build_push "$MINIO_INIT_IMAGE" -f "$OVERRIDE_ROOT/minio-init/Dockerfile" "$KDAI3/_storage/minio_setup"
 
   - stage: Deploy
     displayName: Deploy to Container Apps
@@ -354,7 +240,8 @@ stages:
       - job: Deploy
         displayName: Deploy all services
         steps:
-          # Deploy postgres first so its FQDN is available for the backend
+          - checkout: none
+
           - task: AzureCLI@2
             displayName: Deploy postgres
             env:
@@ -369,43 +256,35 @@ stages:
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
+                set -e
                 for v in POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB; do
                   case "${!v}" in
                     ""|'$('*) echo "##[error]$v is not set in the kdai-secrets variable group"; exit 1 ;;
                   esac
                 done
+
                 if az containerapp show --name "$POSTGRES_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
                   az containerapp secret set \
-                    --name "$POSTGRES_APP" \
-                    --resource-group "$RESOURCE_GROUP" \
-                    --secrets \
-                      "postgres-user=${POSTGRES_USER}" \
-                      "postgres-password=${POSTGRES_PASSWORD}" \
-                      "postgres-db=${POSTGRES_DB}"
+                    --name "$POSTGRES_APP" --resource-group "$RESOURCE_GROUP" \
+                    --secrets "postgres-user=${POSTGRES_USER}" "postgres-password=${POSTGRES_PASSWORD}"
                   az containerapp update \
-                    --name "$POSTGRES_APP" \
-                    --resource-group "$RESOURCE_GROUP" \
+                    --name "$POSTGRES_APP" --resource-group "$RESOURCE_GROUP" \
+                    --image "docker.io/library/postgres:18.0" \
                     --set-env-vars \
                       "POSTGRES_USER=secretref:postgres-user" \
                       "POSTGRES_PASSWORD=secretref:postgres-password" \
-                      "POSTGRES_DB=secretref:postgres-db"
+                      "POSTGRES_DB=${POSTGRES_DB}"
                 else
                   az containerapp create \
-                    --name "$POSTGRES_APP" \
-                    --resource-group "$RESOURCE_GROUP" \
+                    --name "$POSTGRES_APP" --resource-group "$RESOURCE_GROUP" \
                     --environment "$CONTAINER_APP_ENV" \
-                    --image "postgres:16" \
-                    --ingress internal \
-                    --target-port 5432 \
-                    --transport tcp \
+                    --image "docker.io/library/postgres:18.0" \
+                    --ingress internal --transport tcp --target-port 5432 --exposed-port 5432 \
+                    --secrets "postgres-user=${POSTGRES_USER}" "postgres-password=${POSTGRES_PASSWORD}" \
                     --env-vars \
                       "POSTGRES_USER=secretref:postgres-user" \
                       "POSTGRES_PASSWORD=secretref:postgres-password" \
-                      "POSTGRES_DB=secretref:postgres-db" \
-                    --secrets \
-                      "postgres-user=${POSTGRES_USER}" \
-                      "postgres-password=${POSTGRES_PASSWORD}" \
-                      "postgres-db=${POSTGRES_DB}" \
+                      "POSTGRES_DB=${POSTGRES_DB}" \
                     --cpu 0.5 --memory 1.0Gi \
                     --min-replicas 1 --max-replicas 1
                 fi
@@ -423,97 +302,122 @@ stages:
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
+                set -e
                 for v in MINIO_ROOT_USER MINIO_ROOT_PASSWORD; do
                   case "${!v}" in
                     ""|'$('*) echo "##[error]$v is not set in the kdai-secrets variable group"; exit 1 ;;
                   esac
                 done
+                MINIO_IMG="docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z"
+
                 if az containerapp show --name "$MINIO_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
                   az containerapp secret set \
-                    --name "$MINIO_APP" \
-                    --resource-group "$RESOURCE_GROUP" \
-                    --secrets \
-                      "minio-root-user=${MINIO_ROOT_USER}" \
-                      "minio-root-password=${MINIO_ROOT_PASSWORD}"
+                    --name "$MINIO_APP" --resource-group "$RESOURCE_GROUP" \
+                    --secrets "minio-root-user=${MINIO_ROOT_USER}" "minio-root-password=${MINIO_ROOT_PASSWORD}"
                   az containerapp update \
-                    --name "$MINIO_APP" \
-                    --resource-group "$RESOURCE_GROUP" \
+                    --name "$MINIO_APP" --resource-group "$RESOURCE_GROUP" \
+                    --image "$MINIO_IMG" \
                     --set-env-vars \
                       "MINIO_ROOT_USER=secretref:minio-root-user" \
-                      "MINIO_ROOT_PASSWORD=secretref:minio-root-password" \
-                      "MINIO_CONSOLE_ADDRESS=:9001"
+                      "MINIO_ROOT_PASSWORD=secretref:minio-root-password"
                 else
                   az containerapp create \
-                    --name "$MINIO_APP" \
-                    --resource-group "$RESOURCE_GROUP" \
+                    --name "$MINIO_APP" --resource-group "$RESOURCE_GROUP" \
                     --environment "$CONTAINER_APP_ENV" \
-                    --image "minio/minio:latest" \
-                    --ingress internal \
-                    --target-port 9000 \
+                    --image "$MINIO_IMG" \
+                    --command "minio" "server" "/data" \
+                    --ingress internal --target-port 9000 --transport auto \
+                    --secrets "minio-root-user=${MINIO_ROOT_USER}" "minio-root-password=${MINIO_ROOT_PASSWORD}" \
                     --env-vars \
                       "MINIO_ROOT_USER=secretref:minio-root-user" \
                       "MINIO_ROOT_PASSWORD=secretref:minio-root-password" \
-                      "MINIO_CONSOLE_ADDRESS=:9001" \
-                    --secrets \
-                      "minio-root-user=${MINIO_ROOT_USER}" \
-                      "minio-root-password=${MINIO_ROOT_PASSWORD}" \
-                    --command "minio" \
-                    --args "server" "/data" \
                     --cpu 0.5 --memory 1.0Gi \
                     --min-replicas 1 --max-replicas 1
                 fi
 
-                # The containerapp CLI extension can print an error yet exit 0, leaving the
-                # step green without creating anything. Assert the app actually exists.
-                az containerapp show --name "$MINIO_APP" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1 \
-                  || { echo "##[error]Minio app '$MINIO_APP' does not exist after the deploy step — see the 'az containerapp create' output above for the real failure."; exit 1; }
-
           - task: AzureCLI@2
-            displayName: Ensure MinIO debates bucket
+            displayName: Run MinIO init job (bucket + service accounts)
             env:
+              IMAGE_TAG: $(Build.BuildId)
+              MINIO_INIT_JOB: $(MINIO_INIT_JOB)
+              MINIO_INIT_IMAGE: $(MINIO_INIT_IMAGE)
+              MINIO_APP: $(MINIO_APP)
               RESOURCE_GROUP: $(RESOURCE_GROUP)
               CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
-              IMAGE_TAG: $(Build.BuildId)
-              MINIO_APP: $(MINIO_APP)
-              MINIO_INIT_IMAGE: $(MINIO_INIT_IMAGE)
-              MINIO_INIT_APP: $(MINIO_INIT_APP)
               MINIO_ROOT_USER: $(MINIO_ROOT_USER)
               MINIO_ROOT_PASSWORD: $(MINIO_ROOT_PASSWORD)
+              MINIO_CSP_USER: $(MINIO_CSP_USER)
+              MINIO_CSP_PASSWORD: $(MINIO_CSP_PASSWORD)
+              MINIO_BACKEND_USER: $(MINIO_BACKEND_USER)
+              MINIO_BACKEND_PASSWORD: $(MINIO_BACKEND_PASSWORD)
             inputs:
               azureSubscription: $(AZURE_SERVICE_CONNECTION)
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
-                # Lightweight always-on Container App (minio/mc) that creates the "debates" bucket
-                # and re-ensures it hourly. The backend (getFullTranscript) and ATTS services
-                # read/write objects there; without it MinIO returns "Unable to check existence".
-                # Deployed as an APP (not a Job) because Microsoft.App/jobs may be restricted here.
-                # No ingress (pure background worker).
+                set -e
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
-                [ -n "$ACR_LOGIN_SERVER" ] || { echo "##[error]No ACR found in resource group $RESOURCE_GROUP"; exit 1; }
-                ENV_DOMAIN=$(az containerapp env show --name "$CONTAINER_APP_ENV" --resource-group "$RESOURCE_GROUP" --query properties.defaultDomain -o tsv)
-                [ -n "$ENV_DOMAIN" ] || { echo "##[error]Could not resolve default domain"; exit 1; }
-                MINIO_URL="https://${MINIO_APP}.internal.${ENV_DOMAIN}"
 
-                if az containerapp show --name "$MINIO_INIT_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
-                  az containerapp secret set --name "$MINIO_INIT_APP" --resource-group "$RESOURCE_GROUP" \
-                    --secrets "minio-root-user=${MINIO_ROOT_USER}" "minio-root-password=${MINIO_ROOT_PASSWORD}"
-                  az containerapp registry set --name "$MINIO_INIT_APP" --resource-group "$RESOURCE_GROUP" --server "$ACR_LOGIN_SERVER" --identity system
-                  az containerapp update --name "$MINIO_INIT_APP" --resource-group "$RESOURCE_GROUP" \
-                    --image "$ACR_LOGIN_SERVER/$MINIO_INIT_IMAGE:$IMAGE_TAG" --min-replicas 1 \
-                    --set-env-vars "MINIO_URL=${MINIO_URL}" "MINIO_ROOT_USER=secretref:minio-root-user" "MINIO_ROOT_PASSWORD=secretref:minio-root-password"
-                else
-                  az containerapp create --name "$MINIO_INIT_APP" --resource-group "$RESOURCE_GROUP" \
-                    --environment "$CONTAINER_APP_ENV" \
-                    --image "$ACR_LOGIN_SERVER/$MINIO_INIT_IMAGE:$IMAGE_TAG" \
-                    --registry-server "$ACR_LOGIN_SERVER" --registry-identity system \
-                    --secrets "minio-root-user=${MINIO_ROOT_USER}" "minio-root-password=${MINIO_ROOT_PASSWORD}" \
-                    --env-vars "MINIO_URL=${MINIO_URL}" "MINIO_ROOT_USER=secretref:minio-root-user" "MINIO_ROOT_PASSWORD=secretref:minio-root-password" \
-                    --cpu 0.25 --memory 0.5Gi --min-replicas 1 --max-replicas 1
+                # Dedicated MinIO service accounts. If the variable group doesn't define
+                # them, fall back to deterministic usernames with the root password —
+                # fine for inno-d, add real entries for anything more.
+                case "$MINIO_CSP_USER" in ""|'$('*) MINIO_CSP_USER="kdai-csp" ;; esac
+                case "$MINIO_CSP_PASSWORD" in ""|'$('*) MINIO_CSP_PASSWORD="$MINIO_ROOT_PASSWORD" ;; esac
+                case "$MINIO_BACKEND_USER" in ""|'$('*) MINIO_BACKEND_USER="kdai-backend" ;; esac
+                case "$MINIO_BACKEND_PASSWORD" in ""|'$('*) MINIO_BACKEND_PASSWORD="$MINIO_ROOT_PASSWORD" ;; esac
+
+                MINIO_FQDN=$(az containerapp show --name "$MINIO_APP" --resource-group "$RESOURCE_GROUP" \
+                  --query "properties.configuration.ingress.fqdn" -o tsv)
+                [ -n "$MINIO_FQDN" ] || { echo "##[error]MinIO app '$MINIO_APP' has no ingress FQDN"; exit 1; }
+
+                # Jobs are stateless: recreate for a deterministic spec (update flags for
+                # jobs are patchy across CLI versions).
+                if az containerapp job show --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
+                  az containerapp job delete --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP" --yes
                 fi
+                az containerapp job create \
+                  --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP" \
+                  --environment "$CONTAINER_APP_ENV" \
+                  --trigger-type Manual --replica-timeout 900 --replica-retry-limit 1 \
+                  --parallelism 1 --replica-completion-count 1 \
+                  --image "$ACR_LOGIN_SERVER/$MINIO_INIT_IMAGE:$IMAGE_TAG" \
+                  --registry-server "$ACR_LOGIN_SERVER" --registry-identity system \
+                  --cpu 0.25 --memory 0.5Gi \
+                  --secrets \
+                    "minio-root-user=${MINIO_ROOT_USER}" \
+                    "minio-root-password=${MINIO_ROOT_PASSWORD}" \
+                    "minio-csp-user=${MINIO_CSP_USER}" \
+                    "minio-csp-password=${MINIO_CSP_PASSWORD}" \
+                    "minio-backend-user=${MINIO_BACKEND_USER}" \
+                    "minio-backend-password=${MINIO_BACKEND_PASSWORD}" \
+                  --env-vars \
+                    "MINIO_INIT_HOST=https://${MINIO_FQDN}" \
+                    "MINIO_DEBATE_BUCKET_NAME=debates" \
+                    "MINIO_FULL_POLICY_FILE_NAME=full_policy.json" \
+                    "MINIO_RESTRICTED_POLICY_FILE_NAME=restricted_policy.json" \
+                    "MINIO_ROOT_USER=secretref:minio-root-user" \
+                    "MINIO_ROOT_PASSWORD=secretref:minio-root-password" \
+                    "MINIO_CSP_USER=secretref:minio-csp-user" \
+                    "MINIO_CSP_PASSWORD=secretref:minio-csp-password" \
+                    "MINIO_BACKEND_USER=secretref:minio-backend-user" \
+                    "MINIO_BACKEND_PASSWORD=secretref:minio-backend-password"
+
+                az containerapp job start --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP"
+                echo "Waiting for MinIO init job to finish..."
+                for i in $(seq 1 30); do
+                  STATUS=$(az containerapp job execution list --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP" \
+                    --query "[0].properties.status" -o tsv 2>/dev/null || true)
+                  echo "  attempt $i: $STATUS"
+                  [ "$STATUS" = "Succeeded" ] && break
+                  if [ "$STATUS" = "Failed" ]; then
+                    echo "##[error]MinIO init job failed — check its logs in the portal"; exit 1
+                  fi
+                  sleep 10
+                done
+                [ "$STATUS" = "Succeeded" ] || { echo "##[error]MinIO init job did not finish in time"; exit 1; }
 
           - task: AzureCLI@2
-            displayName: Deploy Redis (ATTS message bus)
+            displayName: Deploy Redis (Valkey message bus)
             env:
               REDIS_APP: $(REDIS_APP)
               RESOURCE_GROUP: $(RESOURCE_GROUP)
@@ -523,41 +427,30 @@ stages:
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
-                # Internal-only Redis used as the message bus between the ATTS services.
-                # Transient queues only (no persistence needed). TCP ingress on 6379.
+                set -e
+                REDIS_IMG="docker.io/valkey/valkey:9.0-trixie"
                 if az containerapp show --name "$REDIS_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
-                  echo "Redis app '$REDIS_APP' already exists; leaving as-is."
+                  az containerapp update \
+                    --name "$REDIS_APP" --resource-group "$RESOURCE_GROUP" \
+                    --image "$REDIS_IMG"
                 else
                   az containerapp create \
-                    --name "$REDIS_APP" \
-                    --resource-group "$RESOURCE_GROUP" \
+                    --name "$REDIS_APP" --resource-group "$RESOURCE_GROUP" \
                     --environment "$CONTAINER_APP_ENV" \
-                    --image "redis:7" \
-                    --ingress internal \
-                    --target-port 6379 \
-                    --transport tcp \
+                    --image "$REDIS_IMG" \
+                    --ingress internal --transport tcp --target-port 6379 --exposed-port 6379 \
                     --cpu 0.25 --memory 0.5Gi \
                     --min-replicas 1 --max-replicas 1
                 fi
-                az containerapp show --name "$REDIS_APP" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1 \
-                  || { echo "##[error]Redis app '$REDIS_APP' does not exist after the deploy step."; exit 1; }
 
           - task: AzureCLI@2
-            displayName: Deploy ATTS workers (TS, CSP, TFS)
+            displayName: Deploy WhisperLive shim (Azure AI Speech)
             env:
+              IMAGE_TAG: $(Build.BuildId)
+              WHISPERLIVE_APP: $(WHISPERLIVE_APP)
+              WHISPERLIVE_IMAGE: $(WHISPERLIVE_IMAGE)
               RESOURCE_GROUP: $(RESOURCE_GROUP)
               CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
-              IMAGE_TAG: $(Build.BuildId)
-              TS_APP: $(TS_APP)
-              CSP_APP: $(CSP_APP)
-              TFS_APP: $(TFS_APP)
-              REDIS_APP: $(REDIS_APP)
-              MINIO_APP: $(MINIO_APP)
-              TS_IMAGE: $(TS_IMAGE)
-              CSP_IMAGE: $(CSP_IMAGE)
-              TFS_IMAGE: $(TFS_IMAGE)
-              MINIO_ROOT_USER: $(MINIO_ROOT_USER)
-              MINIO_ROOT_PASSWORD: $(MINIO_ROOT_PASSWORD)
               SPEECH_KEY: $(SPEECH_KEY)
               SPEECH_REGION: $(SPEECH_REGION)
             inputs:
@@ -565,514 +458,201 @@ stages:
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
-                # The three ATTS worker services consume Redis queues and read/write audio +
-                # transcripts in MinIO. They expose an internal HTTP /health endpoint that the
-                # Conductor polls, so each gets internal ingress on its service port.
-                # For this dev (inno-d) environment the workers authenticate to MinIO with the
-                # root credentials (the per-service MinIO users from the docker-compose minio-init
-                # job are not provisioned here).
-                for v in MINIO_ROOT_USER MINIO_ROOT_PASSWORD SPEECH_KEY SPEECH_REGION; do
-                  case "${!v}" in
-                    ""|'$('*) echo "##[error]$v is not set in the kdai-secrets variable group"; exit 1 ;;
-                  esac
-                done
+                set -e
+                case "$SPEECH_KEY" in
+                  ""|'$('*)
+                    echo "##[warning]SPEECH_KEY not set in kdai-secrets — skipping WhisperLive shim deploy; transcription will not work."
+                    exit 0 ;;
+                esac
+                case "$SPEECH_REGION" in
+                  ""|'$('*)
+                    echo "##[warning]SPEECH_REGION not set in kdai-secrets — skipping WhisperLive shim deploy."
+                    exit 0 ;;
+                esac
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
-                [ -n "$ACR_LOGIN_SERVER" ] || { echo "##[error]No ACR found in resource group $RESOURCE_GROUP"; exit 1; }
-                ENV_DOMAIN=$(az containerapp env show --name "$CONTAINER_APP_ENV" --resource-group "$RESOURCE_GROUP" --query properties.defaultDomain -o tsv)
-                [ -n "$ENV_DOMAIN" ] || { echo "##[error]Could not resolve default domain for Container Apps env $CONTAINER_APP_ENV"; exit 1; }
 
-                # TCP services (Redis/Postgres) must be reached by SHORT app name; the long
-                # .internal.<domain> FQDN resolves to the HTTP ingress LB, which does not serve TCP.
-                REDIS_URL="redis://${REDIS_APP}:6379/0"
-                MINIO_HOST="${MINIO_APP}.internal.${ENV_DOMAIN}"
-
-                # Env shared by all ATTS workers (MinIO over the env's internal https ingress).
-                COMMON_ENV=( \
-                  "REDIS_URL=${REDIS_URL}" \
-                  "MINIO_HOST=${MINIO_HOST}" \
-                  "MINIO_DEBATE_BUCKET_NAME=debates" \
-                  "MINIO_PRESIGNED_URL_EXPIRATION=500" \
-                  "MINIO_SECURE=True" \
-                  "LOCAL_AUDIO_SAVE_DIR=output_audio" \
-                  "AUDIO_FILE_FORMAT=wav" )
-
-                deploy_worker() {
-                  local app="$1" image="$2" port="$3"; shift 3
-                  local extra_env=("$@")
-                  if az containerapp show --name "$app" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
-                    az containerapp secret set --name "$app" --resource-group "$RESOURCE_GROUP" \
-                      --secrets "minio-user=${MINIO_ROOT_USER}" "minio-password=${MINIO_ROOT_PASSWORD}" "speech-key=${SPEECH_KEY}"
-                    az containerapp registry set --name "$app" --resource-group "$RESOURCE_GROUP" --server "$ACR_LOGIN_SERVER" --identity system
-                    az containerapp ingress enable --name "$app" --resource-group "$RESOURCE_GROUP" --type internal --target-port "$port" --transport auto 2>/dev/null || true
-                    az containerapp update --name "$app" --resource-group "$RESOURCE_GROUP" \
-                      --image "$ACR_LOGIN_SERVER/$image:$IMAGE_TAG" --min-replicas 1 \
-                      --set-env-vars "${COMMON_ENV[@]}" "${extra_env[@]}"
-                  else
-                    az containerapp create --name "$app" --resource-group "$RESOURCE_GROUP" \
-                      --environment "$CONTAINER_APP_ENV" \
-                      --image "$ACR_LOGIN_SERVER/$image:$IMAGE_TAG" \
-                      --registry-server "$ACR_LOGIN_SERVER" --registry-identity system \
-                      --ingress internal --target-port "$port" --transport auto \
-                      --secrets "minio-user=${MINIO_ROOT_USER}" "minio-password=${MINIO_ROOT_PASSWORD}" "speech-key=${SPEECH_KEY}" \
-                      --env-vars "${COMMON_ENV[@]}" "${extra_env[@]}" \
-                      --cpu 0.5 --memory 1.0Gi --min-replicas 1 --max-replicas 1
-                  fi
-                  az containerapp show --name "$app" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1 \
-                    || { echo "##[error]App '$app' does not exist after deploy."; exit 1; }
-                }
-
-                # TS — transcription via Azure AI Speech (WhisperX/GPU removed)
-                deploy_worker "$TS_APP" "$TS_IMAGE" 7020 \
-                  "TS_DOCKER_PORT=7020" \
-                  "MINIO_TS_USER=secretref:minio-user" \
-                  "MINIO_TS_PASSWORD=secretref:minio-password" \
-                  "SPEECH_KEY=secretref:speech-key" \
-                  "SPEECH_REGION=${SPEECH_REGION}" \
-                  "SPEECH_LANGUAGE=nl-NL"
-
-                # CSP — continuous stream processor (m3u8 -> 25s wav segments)
-                deploy_worker "$CSP_APP" "$CSP_IMAGE" 7010 \
-                  "CSP_DOCKER_PORT=7010" \
-                  "MINIO_CSP_USER=secretref:minio-user" \
-                  "MINIO_CSP_PASSWORD=secretref:minio-password" \
-                  "M3U8_INIT_SEGMENT_PATTERN=#EXT-X-MAP:" \
-                  "AUDIO_FILE_NAME=audio" \
-                  "AUDIO_SEGMENT_SIZE=25000"
-
-                # TFS — transcript filter (CPU: dictionary + fuzzy matching, no LLM)
-                deploy_worker "$TFS_APP" "$TFS_IMAGE" 7030 \
-                  "TFS_DOCKER_PORT=7030" \
-                  "MINIO_TFS_USER=secretref:minio-user" \
-                  "MINIO_TFS_PASSWORD=secretref:minio-password"
+                if az containerapp show --name "$WHISPERLIVE_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
+                  az containerapp secret set \
+                    --name "$WHISPERLIVE_APP" --resource-group "$RESOURCE_GROUP" \
+                    --secrets "speech-key=${SPEECH_KEY}"
+                  az containerapp registry set \
+                    --name "$WHISPERLIVE_APP" --resource-group "$RESOURCE_GROUP" \
+                    --server "$ACR_LOGIN_SERVER" --identity system
+                  az containerapp update \
+                    --name "$WHISPERLIVE_APP" --resource-group "$RESOURCE_GROUP" \
+                    --image "$ACR_LOGIN_SERVER/$WHISPERLIVE_IMAGE:$IMAGE_TAG" \
+                    --set-env-vars \
+                      "SPEECH_KEY=secretref:speech-key" \
+                      "SPEECH_REGION=${SPEECH_REGION}" \
+                      "SPEECH_LANGUAGE=nl-NL" \
+                      "WHISPERLIVE_PORT=9090"
+                else
+                  az containerapp create \
+                    --name "$WHISPERLIVE_APP" --resource-group "$RESOURCE_GROUP" \
+                    --environment "$CONTAINER_APP_ENV" \
+                    --image "$ACR_LOGIN_SERVER/$WHISPERLIVE_IMAGE:$IMAGE_TAG" \
+                    --registry-server "$ACR_LOGIN_SERVER" --registry-identity system \
+                    --ingress internal --transport tcp --target-port 9090 --exposed-port 9090 \
+                    --secrets "speech-key=${SPEECH_KEY}" \
+                    --env-vars \
+                      "SPEECH_KEY=secretref:speech-key" \
+                      "SPEECH_REGION=${SPEECH_REGION}" \
+                      "SPEECH_LANGUAGE=nl-NL" \
+                      "WHISPERLIVE_PORT=9090" \
+                    --cpu 1.0 --memory 2.0Gi \
+                    --min-replicas 1 --max-replicas 1
+                fi
 
           - task: AzureCLI@2
-            displayName: Deploy M3U8 emulator (simulation stream)
+            displayName: Deploy M3U8 emulator (test stream)
             env:
-              RESOURCE_GROUP: $(RESOURCE_GROUP)
-              CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
               IMAGE_TAG: $(Build.BuildId)
               M3U8_APP: $(M3U8_APP)
               M3U8_IMAGE: $(M3U8_IMAGE)
+              RESOURCE_GROUP: $(RESOURCE_GROUP)
+              CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
             inputs:
               azureSubscription: $(AZURE_SERVICE_CONNECTION)
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
-                # The "Debat emulator" serves a looping fake HLS stream on :2121 (nginx + ffmpeg
-                # over debat-sample.mp3). When the emulator is toggled ON in App Management, the
-                # backend points transcription at http://kdai-m3u8-emulator:2121/hls/stream.m3u8
-                # (hardcoded host + port), which CSP fetches. The app MUST be named exactly
-                # "kdai-m3u8-emulator" so CSP's short-name lookup resolves to it, and it MUST use
-                # TCP ingress (like Redis) so that :2121 is actually served — an HTTP/"auto"
-                # ingress only answers on 80/443, so CSP's fetch to :2121 would hang/refuse.
+                set -e
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
-                [ -n "$ACR_LOGIN_SERVER" ] || { echo "##[error]No ACR found in resource group $RESOURCE_GROUP"; exit 1; }
                 if az containerapp show --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
-                  az containerapp registry set --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" --server "$ACR_LOGIN_SERVER" --identity system
-                  # Disable ingress first so an app previously created with HTTP ingress is
-                  # cleanly re-enabled as TCP (switching transport in place is unreliable).
-                  az containerapp ingress disable --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1 || true
-                  az containerapp ingress enable --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" --type internal --target-port 2121 --transport tcp
-                  az containerapp update --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" \
-                    --image "$ACR_LOGIN_SERVER/$M3U8_IMAGE:$IMAGE_TAG" --min-replicas 1 \
-                    --set-env-vars "USE_INTERNAL_M3U8_STREAMING=true"
+                  az containerapp registry set \
+                    --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" \
+                    --server "$ACR_LOGIN_SERVER" --identity system
+                  az containerapp update \
+                    --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" \
+                    --image "$ACR_LOGIN_SERVER/$M3U8_IMAGE:$IMAGE_TAG" \
+                    --set-env-vars "M3U8_DOCKER_PORT=2121"
                 else
-                  az containerapp create --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" \
+                  az containerapp create \
+                    --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" \
                     --environment "$CONTAINER_APP_ENV" \
                     --image "$ACR_LOGIN_SERVER/$M3U8_IMAGE:$IMAGE_TAG" \
                     --registry-server "$ACR_LOGIN_SERVER" --registry-identity system \
-                    --ingress internal --target-port 2121 --transport tcp \
-                    --env-vars "USE_INTERNAL_M3U8_STREAMING=true" \
-                    --cpu 0.5 --memory 1.0Gi --min-replicas 1 --max-replicas 1
+                    --ingress internal --target-port 2121 --transport auto \
+                    --env-vars "M3U8_DOCKER_PORT=2121" \
+                    --cpu 0.5 --memory 1.0Gi \
+                    --min-replicas 1 --max-replicas 1
                 fi
-                az containerapp show --name "$M3U8_APP" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1 \
-                  || { echo "##[error]M3U8 emulator app '$M3U8_APP' does not exist after deploy."; exit 1; }
 
           - task: AzureCLI@2
-            displayName: Deploy backend
+            displayName: Deploy ATTS-CSP (capture + transcription client)
             env:
               IMAGE_TAG: $(Build.BuildId)
-              BACKEND_IMAGE: $(BACKEND_IMAGE)
-              BACKEND_APP: $(BACKEND_APP)
+              CSP_APP: $(CSP_APP)
+              CSP_IMAGE: $(CSP_IMAGE)
+              REDIS_APP: $(REDIS_APP)
+              MINIO_APP: $(MINIO_APP)
+              WHISPERLIVE_APP: $(WHISPERLIVE_APP)
               RESOURCE_GROUP: $(RESOURCE_GROUP)
               CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
-              POSTGRES_APP: $(POSTGRES_APP)
-              MINIO_APP: $(MINIO_APP)
-              POSTGRES_USER: $(POSTGRES_USER)
-              POSTGRES_PASSWORD: $(POSTGRES_PASSWORD)
-              POSTGRES_DB: $(POSTGRES_DB)
-              MINIO_ROOT_USER: $(MINIO_ROOT_USER)
               MINIO_ROOT_PASSWORD: $(MINIO_ROOT_PASSWORD)
-              APP_KEY: $(APP_KEY)
-              CONDUCTOR_APP: $(CONDUCTOR_APP)
-              TCS_APP: $(TCS_APP)
-              REVERB_APP: $(REVERB_APP)
-              STATIC_API_KEY: $(STATIC_API_KEY)
-              REVERB_APP_ID: $(REVERB_APP_ID)
-              REVERB_APP_KEY: $(REVERB_APP_KEY)
-              REVERB_APP_SECRET: $(REVERB_APP_SECRET)
+              MINIO_CSP_USER: $(MINIO_CSP_USER)
+              MINIO_CSP_PASSWORD: $(MINIO_CSP_PASSWORD)
             inputs:
               azureSubscription: $(AZURE_SERVICE_CONNECTION)
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
+                set -e
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
-                [ -n "$ACR_LOGIN_SERVER" ] || { echo "##[error]No ACR found in resource group $RESOURCE_GROUP"; exit 1; }
-                for v in APP_KEY STATIC_API_KEY; do
-                  case "${!v}" in
-                    ""|'$('*) echo "##[error]$v is not set in the kdai-secrets variable group"; exit 1 ;;
-                  esac
-                done
+                case "$MINIO_CSP_USER" in ""|'$('*) MINIO_CSP_USER="kdai-csp" ;; esac
+                case "$MINIO_CSP_PASSWORD" in ""|'$('*) MINIO_CSP_PASSWORD="$MINIO_ROOT_PASSWORD" ;; esac
 
-                POSTGRES_FQDN=$(az containerapp show \
-                  --name "$POSTGRES_APP" \
-                  --resource-group "$RESOURCE_GROUP" \
+                MINIO_FQDN=$(az containerapp show --name "$MINIO_APP" --resource-group "$RESOURCE_GROUP" \
                   --query "properties.configuration.ingress.fqdn" -o tsv)
-                MINIO_FQDN=$(az containerapp show \
-                  --name "$MINIO_APP" \
-                  --resource-group "$RESOURCE_GROUP" \
-                  --query "properties.configuration.ingress.fqdn" -o tsv)
+                [ -n "$MINIO_FQDN" ] || { echo "##[error]MinIO app not found"; exit 1; }
 
-                [ -n "$POSTGRES_FQDN" ] || { echo "##[error]Postgres app '$POSTGRES_APP' not found — its deploy step must succeed first."; exit 1; }
-                [ -n "$MINIO_FQDN" ] || { echo "##[error]Minio app '$MINIO_APP' not found — its deploy step must succeed first."; exit 1; }
+                ENV_VARS=(
+                  "CSP_DOCKER_PORT=7010"
+                  "REDIS_URL=redis://${REDIS_APP}:6379"
+                  "MINIO_HOST=${MINIO_FQDN}:443"
+                  "MINIO_SECURE=True"
+                  "MINIO_DEBATE_BUCKET_NAME=debates"
+                  "MINIO_PRESIGNED_URL_EXPIRATION=3600"
+                  "MINIO_CSP_USER=secretref:minio-csp-user"
+                  "MINIO_CSP_PASSWORD=secretref:minio-csp-password"
+                  "WHISPERLIVE_HOST=${WHISPERLIVE_APP}"
+                  "WHISPERLIVE_PORT=9090"
+                  "MAX_CONCURRENT_STREAMS=2"
+                )
 
-                # Use the SHORT app name as host: TCP ingress is only reachable that way
-                # (the long .internal.<domain> FQDN is the HTTP ingress LB and times out on 5432).
-                DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_APP}:5432/${POSTGRES_DB}"
-
-                # Resolve deterministic FQDNs for the transcription services + Reverb so the
-                # backend is wired even if those apps are created later in this same job.
-                # Internal apps: https on 443 at <app>.internal.<defaultDomain>. Reverb is external.
-                ENV_DOMAIN=$(az containerapp env show --name "$CONTAINER_APP_ENV" --resource-group "$RESOURCE_GROUP" --query properties.defaultDomain -o tsv)
-                [ -n "$ENV_DOMAIN" ] || { echo "##[error]Could not resolve default domain for Container Apps env $CONTAINER_APP_ENV"; exit 1; }
-                CONDUCTOR_URL="https://${CONDUCTOR_APP}.internal.${ENV_DOMAIN}"
-                TCS_BASE_URL="https://${TCS_APP}.internal.${ENV_DOMAIN}"
-                REVERB_FQDN="${REVERB_APP}.${ENV_DOMAIN}"
-
-                if az containerapp show --name "$BACKEND_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
+                if az containerapp show --name "$CSP_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
                   az containerapp secret set \
-                    --name "$BACKEND_APP" \
-                    --resource-group "$RESOURCE_GROUP" \
-                    --secrets \
-                      "database-url=${DATABASE_URL}" \
-                      "minio-root-user=${MINIO_ROOT_USER}" \
-                      "minio-root-password=${MINIO_ROOT_PASSWORD}" \
-                      "app-key=${APP_KEY}" \
-                      "static-api-key=${STATIC_API_KEY}" \
-                      "reverb-app-id=${REVERB_APP_ID}" \
-                      "reverb-app-key=${REVERB_APP_KEY}" \
-                      "reverb-app-secret=${REVERB_APP_SECRET}"
+                    --name "$CSP_APP" --resource-group "$RESOURCE_GROUP" \
+                    --secrets "minio-csp-user=${MINIO_CSP_USER}" "minio-csp-password=${MINIO_CSP_PASSWORD}"
                   az containerapp registry set \
-                    --name "$BACKEND_APP" \
-                    --resource-group "$RESOURCE_GROUP" \
-                    --server "$ACR_LOGIN_SERVER" \
-                    --identity system
+                    --name "$CSP_APP" --resource-group "$RESOURCE_GROUP" \
+                    --server "$ACR_LOGIN_SERVER" --identity system
                   az containerapp ingress enable \
-                    --name "$BACKEND_APP" \
-                    --resource-group "$RESOURCE_GROUP" \
-                    --type external \
-                    --target-port 8000 \
-                    --transport auto
+                    --name "$CSP_APP" --resource-group "$RESOURCE_GROUP" \
+                    --type internal --target-port 7010 --transport auto
                   az containerapp update \
-                    --name "$BACKEND_APP" \
-                    --resource-group "$RESOURCE_GROUP" \
-                    --image "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:$IMAGE_TAG" \
-                    --min-replicas 1 \
-                    --set-env-vars \
-                      "DB_CONNECTION=pgsql" \
-                      "DB_URL=secretref:database-url" \
-                      "MINIO_ENDPOINT=https://${MINIO_FQDN}" \
-                      "MINIO_ACCESS_KEY=secretref:minio-root-user" \
-                      "MINIO_SECRET_KEY=secretref:minio-root-password" \
-                      "MINIO_BUCKET=debates" \
-                      "APP_KEY=secretref:app-key" \
-                      "STATIC_API_KEY=secretref:static-api-key" \
-                      "LOG_CHANNEL=stderr" \
-                      "ATTS_HEALTH_URL=${CONDUCTOR_URL}/health/all" \
-                      "START_TRANSCRIPTION_URL=${CONDUCTOR_URL}/start-capture" \
-                      "STOP_TRANSCRIPTION_URL=${CONDUCTOR_URL}/stop-capture" \
-                      "TCS_URL=${TCS_BASE_URL}/save-corrected-transcript" \
-                      "STREAM_BASE_URL=https://livestreaming.b67buv2.tweedekamer.nl/live" \
-                      "STREAM_AUDIO_PATH=audio/prog_index.m3u8" \
-                      "BROADCAST_CONNECTION=reverb" \
-                      "REVERB_HOST=${REVERB_FQDN}" \
-                      "REVERB_PORT=443" \
-                      "REVERB_SCHEME=https" \
-                      "REVERB_APP_ID=secretref:reverb-app-id" \
-                      "REVERB_APP_KEY=secretref:reverb-app-key" \
-                      "REVERB_APP_SECRET=secretref:reverb-app-secret"
+                    --name "$CSP_APP" --resource-group "$RESOURCE_GROUP" \
+                    --image "$ACR_LOGIN_SERVER/$CSP_IMAGE:$IMAGE_TAG" \
+                    --set-env-vars "${ENV_VARS[@]}"
                 else
                   az containerapp create \
-                    --name "$BACKEND_APP" \
-                    --resource-group "$RESOURCE_GROUP" \
+                    --name "$CSP_APP" --resource-group "$RESOURCE_GROUP" \
                     --environment "$CONTAINER_APP_ENV" \
-                    --image "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:$IMAGE_TAG" \
-                    --registry-server "$ACR_LOGIN_SERVER" \
-                    --registry-identity system \
-                    --ingress external \
-                    --target-port 8000 \
-                    --env-vars \
-                      "DB_CONNECTION=pgsql" \
-                      "DB_URL=secretref:database-url" \
-                      "MINIO_ENDPOINT=https://${MINIO_FQDN}" \
-                      "MINIO_ACCESS_KEY=secretref:minio-root-user" \
-                      "MINIO_SECRET_KEY=secretref:minio-root-password" \
-                      "MINIO_BUCKET=debates" \
-                      "APP_KEY=secretref:app-key" \
-                      "STATIC_API_KEY=secretref:static-api-key" \
-                      "LOG_CHANNEL=stderr" \
-                      "ATTS_HEALTH_URL=${CONDUCTOR_URL}/health/all" \
-                      "START_TRANSCRIPTION_URL=${CONDUCTOR_URL}/start-capture" \
-                      "STOP_TRANSCRIPTION_URL=${CONDUCTOR_URL}/stop-capture" \
-                      "TCS_URL=${TCS_BASE_URL}/save-corrected-transcript" \
-                      "STREAM_BASE_URL=https://livestreaming.b67buv2.tweedekamer.nl/live" \
-                      "STREAM_AUDIO_PATH=audio/prog_index.m3u8" \
-                      "BROADCAST_CONNECTION=reverb" \
-                      "REVERB_HOST=${REVERB_FQDN}" \
-                      "REVERB_PORT=443" \
-                      "REVERB_SCHEME=https" \
-                      "REVERB_APP_ID=secretref:reverb-app-id" \
-                      "REVERB_APP_KEY=secretref:reverb-app-key" \
-                      "REVERB_APP_SECRET=secretref:reverb-app-secret" \
-                    --secrets \
-                      "database-url=${DATABASE_URL}" \
-                      "minio-root-user=${MINIO_ROOT_USER}" \
-                      "minio-root-password=${MINIO_ROOT_PASSWORD}" \
-                      "app-key=${APP_KEY}" \
-                      "static-api-key=${STATIC_API_KEY}" \
-                      "reverb-app-id=${REVERB_APP_ID}" \
-                      "reverb-app-key=${REVERB_APP_KEY}" \
-                      "reverb-app-secret=${REVERB_APP_SECRET}" \
-                    --cpu 0.5 --memory 1.0Gi \
-                    --min-replicas 1 --max-replicas 3
+                    --image "$ACR_LOGIN_SERVER/$CSP_IMAGE:$IMAGE_TAG" \
+                    --registry-server "$ACR_LOGIN_SERVER" --registry-identity system \
+                    --ingress internal --target-port 7010 --transport auto \
+                    --secrets "minio-csp-user=${MINIO_CSP_USER}" "minio-csp-password=${MINIO_CSP_PASSWORD}" \
+                    --env-vars "${ENV_VARS[@]}" \
+                    --cpu 1.0 --memory 2.0Gi \
+                    --min-replicas 1 --max-replicas 1
                 fi
 
           - task: AzureCLI@2
-            displayName: Deploy ATTS Conductor
+            displayName: Deploy frontend (internal, behind nginx)
             env:
+              IMAGE_TAG: $(Build.BuildId)
+              FRONTEND_APP: $(FRONTEND_APP)
+              FRONTEND_IMAGE: $(FRONTEND_IMAGE)
               RESOURCE_GROUP: $(RESOURCE_GROUP)
               CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
-              IMAGE_TAG: $(Build.BuildId)
-              CONDUCTOR_APP: $(CONDUCTOR_APP)
-              CONDUCTOR_IMAGE: $(CONDUCTOR_IMAGE)
-              TS_APP: $(TS_APP)
-              CSP_APP: $(CSP_APP)
-              TFS_APP: $(TFS_APP)
-              REDIS_APP: $(REDIS_APP)
-              BACKEND_APP: $(BACKEND_APP)
-              STATIC_API_KEY: $(STATIC_API_KEY)
             inputs:
               azureSubscription: $(AZURE_SERVICE_CONNECTION)
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
-                # The Conductor orchestrates CSP/TS/TFS over Redis and posts finished segments
-                # back to the backend (Bearer STATIC_API_KEY). Its /health/all endpoint (polled by
-                # the backend before starting a debate) only checks TS/CSP/TFS — NOT the LLM — so
-                # KDAI_LLM_HEALTH_URL is just a placeholder to satisfy config loading.
+                set -e
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
-                [ -n "$ACR_LOGIN_SERVER" ] || { echo "##[error]No ACR found in resource group $RESOURCE_GROUP"; exit 1; }
-                ENV_DOMAIN=$(az containerapp env show --name "$CONTAINER_APP_ENV" --resource-group "$RESOURCE_GROUP" --query properties.defaultDomain -o tsv)
-                [ -n "$ENV_DOMAIN" ] || { echo "##[error]Could not resolve default domain for Container Apps env $CONTAINER_APP_ENV"; exit 1; }
-                BACKEND_FQDN="${BACKEND_APP}.${ENV_DOMAIN}"
-                # TCP services (Redis/Postgres) must be reached by SHORT app name; the long
-                # .internal.<domain> FQDN resolves to the HTTP ingress LB, which does not serve TCP.
-                REDIS_URL="redis://${REDIS_APP}:6379/0"
-
-                ENV_VARS=( \
-                  "CONDUCTOR_DOCKER_PORT=7000" \
-                  "REDIS_URL=${REDIS_URL}" \
-                  "KDAI_LLM_HEALTH_URL=http://localhost" \
-                  "KDAI_TS_HEALTH_URL=https://${TS_APP}.internal.${ENV_DOMAIN}/health" \
-                  "KDAI_CSP_HEALTH_URL=https://${CSP_APP}.internal.${ENV_DOMAIN}/health" \
-                  "KDAI_TFS_HEALTH_URL=https://${TFS_APP}.internal.${ENV_DOMAIN}/health" \
-                  "DEBATE_ID_PATTERN=^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$" \
-                  "M3U8_URL_PATTERN=^(https?://[^\s]+\.m3u8)" \
-                  "BACKEND_TRANSCRIPT_URL=https://${BACKEND_FQDN}/api/debate/transcript" \
-                  "BACKEND_TRANSCRIPT_ERROR_URL=https://${BACKEND_FQDN}/api/debate/transcript/error" \
-                  "STATIC_API_KEY=secretref:static-api-key" )
-
-                if az containerapp show --name "$CONDUCTOR_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
-                  az containerapp secret set --name "$CONDUCTOR_APP" --resource-group "$RESOURCE_GROUP" --secrets "static-api-key=${STATIC_API_KEY}"
-                  az containerapp registry set --name "$CONDUCTOR_APP" --resource-group "$RESOURCE_GROUP" --server "$ACR_LOGIN_SERVER" --identity system
-                  az containerapp ingress enable --name "$CONDUCTOR_APP" --resource-group "$RESOURCE_GROUP" --type internal --target-port 7000 --transport auto 2>/dev/null || true
-                  az containerapp update --name "$CONDUCTOR_APP" --resource-group "$RESOURCE_GROUP" \
-                    --image "$ACR_LOGIN_SERVER/$CONDUCTOR_IMAGE:$IMAGE_TAG" --min-replicas 1 \
-                    --set-env-vars "${ENV_VARS[@]}"
+                if az containerapp show --name "$FRONTEND_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
+                  az containerapp registry set \
+                    --name "$FRONTEND_APP" --resource-group "$RESOURCE_GROUP" \
+                    --server "$ACR_LOGIN_SERVER" --identity system
+                  az containerapp ingress enable \
+                    --name "$FRONTEND_APP" --resource-group "$RESOURCE_GROUP" \
+                    --type internal --target-port 80 --transport auto
+                  az containerapp update \
+                    --name "$FRONTEND_APP" --resource-group "$RESOURCE_GROUP" \
+                    --image "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:$IMAGE_TAG"
                 else
-                  az containerapp create --name "$CONDUCTOR_APP" --resource-group "$RESOURCE_GROUP" \
+                  az containerapp create \
+                    --name "$FRONTEND_APP" --resource-group "$RESOURCE_GROUP" \
                     --environment "$CONTAINER_APP_ENV" \
-                    --image "$ACR_LOGIN_SERVER/$CONDUCTOR_IMAGE:$IMAGE_TAG" \
+                    --image "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:$IMAGE_TAG" \
                     --registry-server "$ACR_LOGIN_SERVER" --registry-identity system \
-                    --ingress internal --target-port 7000 --transport auto \
-                    --secrets "static-api-key=${STATIC_API_KEY}" \
-                    --env-vars "${ENV_VARS[@]}" \
-                    --cpu 0.5 --memory 1.0Gi --min-replicas 1 --max-replicas 1
+                    --ingress internal --target-port 80 --transport auto \
+                    --cpu 0.25 --memory 0.5Gi \
+                    --min-replicas 1 --max-replicas 1
                 fi
-                az containerapp show --name "$CONDUCTOR_APP" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1 \
-                  || { echo "##[error]Conductor app '$CONDUCTOR_APP' does not exist after deploy."; exit 1; }
-
-          - task: AzureCLI@2
-            displayName: Deploy TCS (transcript correction)
-            env:
-              RESOURCE_GROUP: $(RESOURCE_GROUP)
-              CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
-              IMAGE_TAG: $(Build.BuildId)
-              TCS_APP: $(TCS_APP)
-              TCS_IMAGE: $(TCS_IMAGE)
-              REDIS_APP: $(REDIS_APP)
-              MINIO_APP: $(MINIO_APP)
-              MINIO_ROOT_USER: $(MINIO_ROOT_USER)
-              MINIO_ROOT_PASSWORD: $(MINIO_ROOT_PASSWORD)
-            inputs:
-              azureSubscription: $(AZURE_SERVICE_CONNECTION)
-              scriptType: bash
-              scriptLocation: inlineScript
-              inlineScript: |
-                ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
-                [ -n "$ACR_LOGIN_SERVER" ] || { echo "##[error]No ACR found in resource group $RESOURCE_GROUP"; exit 1; }
-                ENV_DOMAIN=$(az containerapp env show --name "$CONTAINER_APP_ENV" --resource-group "$RESOURCE_GROUP" --query properties.defaultDomain -o tsv)
-                [ -n "$ENV_DOMAIN" ] || { echo "##[error]Could not resolve default domain for Container Apps env $CONTAINER_APP_ENV"; exit 1; }
-                # TCP services (Redis/Postgres) must be reached by SHORT app name; the long
-                # .internal.<domain> FQDN resolves to the HTTP ingress LB, which does not serve TCP.
-                REDIS_URL="redis://${REDIS_APP}:6379/0"
-                MINIO_HOST="${MINIO_APP}.internal.${ENV_DOMAIN}"
-
-                ENV_VARS=( \
-                  "TCS_DOCKER_PORT=7500" \
-                  "REDIS_URL=${REDIS_URL}" \
-                  "MINIO_HOST=${MINIO_HOST}" \
-                  "MINIO_DEBATE_BUCKET_NAME=debates" \
-                  "MINIO_PRESIGNED_URL_EXPIRATION=500" \
-                  "MINIO_SECURE=True" \
-                  "MINIO_TCS_USER=secretref:minio-user" \
-                  "MINIO_TCS_PASSWORD=secretref:minio-password" \
-                  "DEBATE_ID_PATTERN=^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$" )
-
-                if az containerapp show --name "$TCS_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
-                  az containerapp secret set --name "$TCS_APP" --resource-group "$RESOURCE_GROUP" --secrets "minio-user=${MINIO_ROOT_USER}" "minio-password=${MINIO_ROOT_PASSWORD}"
-                  az containerapp registry set --name "$TCS_APP" --resource-group "$RESOURCE_GROUP" --server "$ACR_LOGIN_SERVER" --identity system
-                  az containerapp ingress enable --name "$TCS_APP" --resource-group "$RESOURCE_GROUP" --type internal --target-port 7500 --transport auto 2>/dev/null || true
-                  az containerapp update --name "$TCS_APP" --resource-group "$RESOURCE_GROUP" \
-                    --image "$ACR_LOGIN_SERVER/$TCS_IMAGE:$IMAGE_TAG" --min-replicas 1 \
-                    --set-env-vars "${ENV_VARS[@]}"
-                else
-                  az containerapp create --name "$TCS_APP" --resource-group "$RESOURCE_GROUP" \
-                    --environment "$CONTAINER_APP_ENV" \
-                    --image "$ACR_LOGIN_SERVER/$TCS_IMAGE:$IMAGE_TAG" \
-                    --registry-server "$ACR_LOGIN_SERVER" --registry-identity system \
-                    --ingress internal --target-port 7500 --transport auto \
-                    --secrets "minio-user=${MINIO_ROOT_USER}" "minio-password=${MINIO_ROOT_PASSWORD}" \
-                    --env-vars "${ENV_VARS[@]}" \
-                    --cpu 0.5 --memory 1.0Gi --min-replicas 1 --max-replicas 1
-                fi
-                az containerapp show --name "$TCS_APP" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1 \
-                  || { echo "##[error]TCS app '$TCS_APP' does not exist after deploy."; exit 1; }
-
-          - task: AzureCLI@2
-            displayName: Deploy QES (question extraction via Azure OpenAI)
-            env:
-              RESOURCE_GROUP: $(RESOURCE_GROUP)
-              CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
-              IMAGE_TAG: $(Build.BuildId)
-              QES_APP: $(QES_APP)
-              QES_IMAGE: $(QES_IMAGE)
-              REDIS_APP: $(REDIS_APP)
-              MINIO_APP: $(MINIO_APP)
-              BACKEND_APP: $(BACKEND_APP)
-              MINIO_ROOT_USER: $(MINIO_ROOT_USER)
-              MINIO_ROOT_PASSWORD: $(MINIO_ROOT_PASSWORD)
-              STATIC_API_KEY: $(STATIC_API_KEY)
-              AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
-              AZURE_OPENAI_KEY: $(AZURE_OPENAI_KEY)
-              # Hardcoded (same pattern as the invulhulp pipeline): the model deployment on
-              # oai-kdai-inno-d, kept in lockstep with invulhulp's (gpt-chat-latest v2026-05-05).
-              AZURE_OPENAI_DEPLOYMENT: gpt-5.3-chat
-            inputs:
-              azureSubscription: $(AZURE_SERVICE_CONNECTION)
-              scriptType: bash
-              scriptLocation: inlineScript
-              inlineScript: |
-                # QES extracts questions from each CONFIRMED segment (TCS rpush-es qes_queue when a
-                # reviewer saves a correction) using Azure OpenAI, then posts them to the backend
-                # (Bearer STATIC_API_KEY) -> DebateQuestionAddedEvent -> frontend questions.<debateID>
-                # channel. Internal-only and NOT part of the Conductor health check, so it can never
-                # block transcription. Requires an Azure OpenAI resource + chat model deployment and
-                # AZURE_OPENAI_* in the kdai-secrets variable group.
-                # Skip (do not fail) if the Azure OpenAI secrets aren't set yet, so enabling QES
-                # never blocks the rest of the deploy. Add them to kdai-secrets to activate questions.
-                MISSING=""
-                for v in AZURE_OPENAI_ENDPOINT AZURE_OPENAI_KEY AZURE_OPENAI_DEPLOYMENT; do
-                  case "${!v}" in ""|'$('*) MISSING="$MISSING $v" ;; esac
-                done
-                if [ -n "$MISSING" ]; then
-                  echo "##[warning]Skipping QES (questions) deploy: missing secret(s)$MISSING in the kdai-secrets variable group. Create an Azure OpenAI resource + chat model deployment and add them to activate questions. Transcription is unaffected."
-                  exit 0
-                fi
-                ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
-                [ -n "$ACR_LOGIN_SERVER" ] || { echo "##[error]No ACR found in resource group $RESOURCE_GROUP"; exit 1; }
-                ENV_DOMAIN=$(az containerapp env show --name "$CONTAINER_APP_ENV" --resource-group "$RESOURCE_GROUP" --query properties.defaultDomain -o tsv)
-                [ -n "$ENV_DOMAIN" ] || { echo "##[error]Could not resolve default domain for Container Apps env $CONTAINER_APP_ENV"; exit 1; }
-                BACKEND_FQDN="${BACKEND_APP}.${ENV_DOMAIN}"
-                # TCP services (Redis/Postgres) must be reached by SHORT app name; the long
-                # .internal.<domain> FQDN resolves to the HTTP ingress LB, which does not serve TCP.
-                REDIS_URL="redis://${REDIS_APP}:6379/0"
-                MINIO_HOST="${MINIO_APP}.internal.${ENV_DOMAIN}"
-
-                ENV_VARS=( \
-                  "QES_DOCKER_PORT=7100" \
-                  "REDIS_URL=${REDIS_URL}" \
-                  "MINIO_HOST=${MINIO_HOST}" \
-                  "MINIO_DEBATE_BUCKET_NAME=debates" \
-                  "MINIO_PRESIGNED_URL_EXPIRATION=500" \
-                  "MINIO_SECURE=True" \
-                  "MINIO_QES_USER=secretref:minio-user" \
-                  "MINIO_QES_PASSWORD=secretref:minio-password" \
-                  "BACKEND_QES_RESULT_URL=https://${BACKEND_FQDN}/api/debate/question" \
-                  "BACKEND_QES_ERROR_URL=https://${BACKEND_FQDN}/api/debate/question/error" \
-                  "STATIC_API_KEY=secretref:static-api-key" \
-                  "AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}" \
-                  "AZURE_OPENAI_DEPLOYMENT=${AZURE_OPENAI_DEPLOYMENT}" \
-                  "AZURE_OPENAI_API_VERSION=2025-04-01-preview" \
-                  "AZURE_OPENAI_KEY=secretref:azure-openai-key" )
-                SECRETS=( \
-                  "minio-user=${MINIO_ROOT_USER}" \
-                  "minio-password=${MINIO_ROOT_PASSWORD}" \
-                  "static-api-key=${STATIC_API_KEY}" \
-                  "azure-openai-key=${AZURE_OPENAI_KEY}" )
-
-                if az containerapp show --name "$QES_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
-                  az containerapp secret set --name "$QES_APP" --resource-group "$RESOURCE_GROUP" --secrets "${SECRETS[@]}"
-                  az containerapp registry set --name "$QES_APP" --resource-group "$RESOURCE_GROUP" --server "$ACR_LOGIN_SERVER" --identity system
-                  az containerapp ingress enable --name "$QES_APP" --resource-group "$RESOURCE_GROUP" --type internal --target-port 7100 --transport auto 2>/dev/null || true
-                  az containerapp update --name "$QES_APP" --resource-group "$RESOURCE_GROUP" \
-                    --image "$ACR_LOGIN_SERVER/$QES_IMAGE:$IMAGE_TAG" --min-replicas 1 \
-                    --set-env-vars "${ENV_VARS[@]}"
-                else
-                  az containerapp create --name "$QES_APP" --resource-group "$RESOURCE_GROUP" \
-                    --environment "$CONTAINER_APP_ENV" \
-                    --image "$ACR_LOGIN_SERVER/$QES_IMAGE:$IMAGE_TAG" \
-                    --registry-server "$ACR_LOGIN_SERVER" --registry-identity system \
-                    --ingress internal --target-port 7100 --transport auto \
-                    --secrets "${SECRETS[@]}" \
-                    --env-vars "${ENV_VARS[@]}" \
-                    --cpu 0.5 --memory 1.0Gi --min-replicas 1 --max-replicas 1
-                fi
-                az containerapp show --name "$QES_APP" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1 \
-                  || { echo "##[error]QES app '$QES_APP' does not exist after deploy."; exit 1; }
 
           - task: AzureCLI@2
             displayName: Deploy Reverb (websocket server)
             env:
+              IMAGE_TAG: $(Build.BuildId)
+              REVERB_APP: $(REVERB_APP)
+              REVERB_IMAGE: $(REVERB_IMAGE)
+              NGINX_APP: $(NGINX_APP)
+              REDIS_APP: $(REDIS_APP)
               RESOURCE_GROUP: $(RESOURCE_GROUP)
               CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
-              IMAGE_TAG: $(Build.BuildId)
-              BACKEND_IMAGE: $(BACKEND_IMAGE)
-              REVERB_APP: $(REVERB_APP)
-              POSTGRES_APP: $(POSTGRES_APP)
-              POSTGRES_USER: $(POSTGRES_USER)
-              POSTGRES_PASSWORD: $(POSTGRES_PASSWORD)
-              POSTGRES_DB: $(POSTGRES_DB)
               APP_KEY: $(APP_KEY)
               REVERB_APP_ID: $(REVERB_APP_ID)
               REVERB_APP_KEY: $(REVERB_APP_KEY)
@@ -1082,63 +662,237 @@ stages:
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
-                # Laravel Reverb runs from the SAME backend image but with the command overridden
-                # to `reverb:start`. Container Apps only allow one external port per app, which is
-                # why this is a separate app (the backend's own ingress is the HTTP API on 8000).
-                # The browser connects over wss/443 to this app's external FQDN; the backend
-                # publishes events to it using the REVERB_* client settings.
+                set -e
+                for v in APP_KEY REVERB_APP_ID REVERB_APP_KEY REVERB_APP_SECRET; do
+                  case "${!v}" in
+                    ""|'$('*) echo "##[error]$v is not set in the kdai-secrets variable group"; exit 1 ;;
+                  esac
+                done
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
-                [ -n "$ACR_LOGIN_SERVER" ] || { echo "##[error]No ACR found in resource group $RESOURCE_GROUP"; exit 1; }
-                POSTGRES_FQDN=$(az containerapp show --name "$POSTGRES_APP" --resource-group "$RESOURCE_GROUP" --query "properties.configuration.ingress.fqdn" -o tsv)
-                [ -n "$POSTGRES_FQDN" ] || { echo "##[error]Postgres app '$POSTGRES_APP' not found."; exit 1; }
-                # Use the SHORT app name as host: TCP ingress is only reachable that way
-                # (the long .internal.<domain> FQDN is the HTTP ingress LB and times out on 5432).
-                DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_APP}:5432/${POSTGRES_DB}"
+                ENV_DOMAIN=$(az containerapp env show --name "$CONTAINER_APP_ENV" --resource-group "$RESOURCE_GROUP" \
+                  --query properties.defaultDomain -o tsv)
+                NGINX_FQDN="${NGINX_APP}.${ENV_DOMAIN}"
 
-                ENV_VARS=( \
-                  "DB_CONNECTION=pgsql" \
-                  "DB_URL=secretref:database-url" \
-                  "APP_KEY=secretref:app-key" \
-                  "BROADCAST_CONNECTION=reverb" \
-                  "REVERB_SERVER_HOST=0.0.0.0" \
-                  "REVERB_SERVER_PORT=8080" \
-                  "REVERB_APP_ID=secretref:reverb-app-id" \
-                  "REVERB_APP_KEY=secretref:reverb-app-key" \
-                  "REVERB_APP_SECRET=secretref:reverb-app-secret" )
-                SECRETS=( \
-                  "database-url=${DATABASE_URL}" \
-                  "app-key=${APP_KEY}" \
-                  "reverb-app-id=${REVERB_APP_ID}" \
-                  "reverb-app-key=${REVERB_APP_KEY}" \
-                  "reverb-app-secret=${REVERB_APP_SECRET}" )
+                ENV_VARS=(
+                  "APP_KEY=secretref:app-key"
+                  "APP_URL=https://${NGINX_FQDN}"
+                  "LOG_CHANNEL=stderr"
+                  "BROADCAST_CONNECTION=reverb"
+                  "REVERB_APP_ID=secretref:reverb-app-id"
+                  "REVERB_APP_KEY=secretref:reverb-app-key"
+                  "REVERB_APP_SECRET=secretref:reverb-app-secret"
+                  "REVERB_SERVER_HOST=0.0.0.0"
+                  "REVERB_SERVER_PORT=8081"
+                  "REVERB_SERVER_PATH=/app"
+                  "REVERB_SCALING_ENABLED=true"
+                  "REDIS_HOST=${REDIS_APP}"
+                  "REDIS_PORT=6379"
+                  "REDIS_CLIENT=predis"
+                )
+                SECRETS=(
+                  "app-key=${APP_KEY}"
+                  "reverb-app-id=${REVERB_APP_ID}"
+                  "reverb-app-key=${REVERB_APP_KEY}"
+                  "reverb-app-secret=${REVERB_APP_SECRET}"
+                )
 
                 if az containerapp show --name "$REVERB_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
-                  az containerapp secret set --name "$REVERB_APP" --resource-group "$RESOURCE_GROUP" --secrets "${SECRETS[@]}"
-                  az containerapp registry set --name "$REVERB_APP" --resource-group "$RESOURCE_GROUP" --server "$ACR_LOGIN_SERVER" --identity system
-                  az containerapp update --name "$REVERB_APP" --resource-group "$RESOURCE_GROUP" \
-                    --image "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:$IMAGE_TAG" --min-replicas 1 \
+                  az containerapp secret set \
+                    --name "$REVERB_APP" --resource-group "$RESOURCE_GROUP" --secrets "${SECRETS[@]}"
+                  az containerapp registry set \
+                    --name "$REVERB_APP" --resource-group "$RESOURCE_GROUP" \
+                    --server "$ACR_LOGIN_SERVER" --identity system
+                  az containerapp ingress enable \
+                    --name "$REVERB_APP" --resource-group "$RESOURCE_GROUP" \
+                    --type internal --target-port 8081 --transport auto
+                  az containerapp update \
+                    --name "$REVERB_APP" --resource-group "$RESOURCE_GROUP" \
+                    --image "$ACR_LOGIN_SERVER/$REVERB_IMAGE:$IMAGE_TAG" \
                     --set-env-vars "${ENV_VARS[@]}"
                 else
-                  az containerapp create --name "$REVERB_APP" --resource-group "$RESOURCE_GROUP" \
+                  az containerapp create \
+                    --name "$REVERB_APP" --resource-group "$RESOURCE_GROUP" \
+                    --environment "$CONTAINER_APP_ENV" \
+                    --image "$ACR_LOGIN_SERVER/$REVERB_IMAGE:$IMAGE_TAG" \
+                    --registry-server "$ACR_LOGIN_SERVER" --registry-identity system \
+                    --ingress internal --target-port 8081 --transport auto \
+                    --secrets "${SECRETS[@]}" \
+                    --env-vars "${ENV_VARS[@]}" \
+                    --cpu 0.5 --memory 1.0Gi \
+                    --min-replicas 1 --max-replicas 1
+                fi
+
+          - task: AzureCLI@2
+            displayName: Deploy backend (php-fpm + queue + atts-listener)
+            env:
+              IMAGE_TAG: $(Build.BuildId)
+              BACKEND_APP: $(BACKEND_APP)
+              BACKEND_IMAGE: $(BACKEND_IMAGE)
+              POSTGRES_APP: $(POSTGRES_APP)
+              MINIO_APP: $(MINIO_APP)
+              REDIS_APP: $(REDIS_APP)
+              CSP_APP: $(CSP_APP)
+              WHISPERLIVE_APP: $(WHISPERLIVE_APP)
+              M3U8_APP: $(M3U8_APP)
+              REVERB_APP: $(REVERB_APP)
+              NGINX_APP: $(NGINX_APP)
+              RESOURCE_GROUP: $(RESOURCE_GROUP)
+              CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
+              APP_KEY: $(APP_KEY)
+              STATIC_API_KEY: $(STATIC_API_KEY)
+              POSTGRES_USER: $(POSTGRES_USER)
+              POSTGRES_PASSWORD: $(POSTGRES_PASSWORD)
+              POSTGRES_DB: $(POSTGRES_DB)
+              MINIO_ROOT_PASSWORD: $(MINIO_ROOT_PASSWORD)
+              MINIO_BACKEND_USER: $(MINIO_BACKEND_USER)
+              MINIO_BACKEND_PASSWORD: $(MINIO_BACKEND_PASSWORD)
+              REVERB_APP_ID: $(REVERB_APP_ID)
+              REVERB_APP_KEY: $(REVERB_APP_KEY)
+              REVERB_APP_SECRET: $(REVERB_APP_SECRET)
+              AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
+              AZURE_OPENAI_KEY: $(AZURE_OPENAI_KEY)
+              LLM_MODEL_DEPLOYMENT: $(LLM_MODEL_DEPLOYMENT)
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -e
+                for v in APP_KEY STATIC_API_KEY POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB REVERB_APP_ID REVERB_APP_KEY REVERB_APP_SECRET; do
+                  case "${!v}" in
+                    ""|'$('*) echo "##[error]$v is not set in the kdai-secrets variable group"; exit 1 ;;
+                  esac
+                done
+                case "$MINIO_BACKEND_USER" in ""|'$('*) MINIO_BACKEND_USER="kdai-backend" ;; esac
+                case "$MINIO_BACKEND_PASSWORD" in ""|'$('*) MINIO_BACKEND_PASSWORD="$MINIO_ROOT_PASSWORD" ;; esac
+                # LLM: Azure OpenAI's OpenAI-compatible chat-completions endpoint.
+                case "$AZURE_OPENAI_ENDPOINT" in ""|'$('*) AZURE_OPENAI_ENDPOINT="https://oai-kdai-inno-d.openai.azure.com" ;; esac
+                case "$AZURE_OPENAI_KEY" in
+                  ""|'$('*)
+                    echo "##[warning]AZURE_OPENAI_KEY not set — question extraction / AI suggestions will fail auth."
+                    AZURE_OPENAI_KEY="not-set" ;;
+                esac
+                LLM_URL="${AZURE_OPENAI_ENDPOINT%/}/openai/v1/chat/completions"
+
+                ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
+                ENV_DOMAIN=$(az containerapp env show --name "$CONTAINER_APP_ENV" --resource-group "$RESOURCE_GROUP" \
+                  --query properties.defaultDomain -o tsv)
+                MINIO_FQDN=$(az containerapp show --name "$MINIO_APP" --resource-group "$RESOURCE_GROUP" \
+                  --query "properties.configuration.ingress.fqdn" -o tsv)
+                [ -n "$MINIO_FQDN" ] || { echo "##[error]MinIO app not found"; exit 1; }
+                # Deterministic FQDNs (apps may be created later in this same job):
+                NGINX_FQDN="${NGINX_APP}.${ENV_DOMAIN}"
+                CSP_FQDN="${CSP_APP}.internal.${ENV_DOMAIN}"
+                M3U8_FQDN="${M3U8_APP}.internal.${ENV_DOMAIN}"
+                REVERB_FQDN="${REVERB_APP}.internal.${ENV_DOMAIN}"
+
+                ENV_VARS=(
+                  "APP_KEY=secretref:app-key"
+                  "APP_URL=https://${NGINX_FQDN}"
+                  "LOG_CHANNEL=stderr"
+                  "DB_CONNECTION=pgsql"
+                  "DB_HOST=${POSTGRES_APP}"
+                  "DB_PORT=5432"
+                  "DB_DATABASE=${POSTGRES_DB}"
+                  "DB_USERNAME=${POSTGRES_USER}"
+                  "DB_PASSWORD=secretref:db-password"
+                  "STATIC_API_KEY=secretref:static-api-key"
+                  "MINIO_ENDPOINT=https://${MINIO_FQDN}"
+                  "MINIO_ACCESS_KEY=secretref:minio-backend-user"
+                  "MINIO_SECRET_KEY=secretref:minio-backend-password"
+                  "MINIO_BUCKET=debates"
+                  "AWS_ACCESS_KEY_ID=secretref:minio-backend-user"
+                  "AWS_SECRET_ACCESS_KEY=secretref:minio-backend-password"
+                  "AWS_DEFAULT_REGION=us-east-1"
+                  "AWS_BUCKET=debates"
+                  "AWS_ENDPOINT=https://${MINIO_FQDN}"
+                  "AWS_URL=https://${MINIO_FQDN}/debates"
+                  "AWS_USE_PATH_STYLE_ENDPOINT=true"
+                  "FILESYSTEM_DISK=s3"
+                  "SANCTUM_STATEFUL_DOMAINS=${NGINX_FQDN}"
+                  "ATTS_CSP_URL=https://${CSP_FQDN}/health"
+                  "ATTS_WHISPERLIVE_URL=http://${WHISPERLIVE_APP}:9090/health"
+                  "ATTS_CSP_QUEUE=csp_queue"
+                  "ATTS_TS_QUEUE=csp_queue"
+                  "ATTS_TFS_QUEUE=tfs_queue"
+                  "ATTS_CSP_SEGMENT_COMPLETE_QUEUE=csp_segment_complete"
+                  "ATTS_TS_SEGMENT_COMPLETE_QUEUE=ts_segment_complete"
+                  "ATTS_TFS_SEGMENT_COMPLETE_QUEUE=tfs_segment_complete"
+                  "ATTS_ERROR_NOTIFICATION_QUEUE=error_notification"
+                  "LLM_URL=${LLM_URL}"
+                  "LLM_MODEL=${LLM_MODEL_DEPLOYMENT}"
+                  "LLM_AUTH_KEY=secretref:llm-auth-key"
+                  "STREAM_BASE_URL=https://livestreaming.b67buv2.tweedekamer.nl/live"
+                  "STREAM_AUDIO_PATH=audio/prog_index.m3u8"
+                  "STREAM_EMULATOR_URL=https://${M3U8_FQDN}/hls/stream.m3u8"
+                  "M3U8_DOCKER_PORT=2121"
+                  "BROADCAST_CONNECTION=reverb"
+                  "REVERB_APP_ID=secretref:reverb-app-id"
+                  "REVERB_APP_KEY=secretref:reverb-app-key"
+                  "REVERB_APP_SECRET=secretref:reverb-app-secret"
+                  "REVERB_HOST=${REVERB_FQDN}"
+                  "REVERB_PORT=443"
+                  "REVERB_SCHEME=https"
+                  "REVERB_PATH=/app"
+                  "REVERB_SERVER_HOST=0.0.0.0"
+                  # broadcasting.php uses REVERB_SERVER_PORT for the server->Reverb POST,
+                  # which goes through the Reverb app's internal https ingress (443). The
+                  # in-container reverb process then binds :443 too — harmless, unused.
+                  "REVERB_SERVER_PORT=443"
+                  "REVERB_SERVER_PATH=/app"
+                  "REVERB_SCALING_ENABLED=true"
+                  "REDIS_HOST=${REDIS_APP}"
+                  "REDIS_PORT=6379"
+                  "REDIS_CLIENT=predis"
+                )
+                SECRETS=(
+                  "app-key=${APP_KEY}"
+                  "db-password=${POSTGRES_PASSWORD}"
+                  "static-api-key=${STATIC_API_KEY}"
+                  "minio-backend-user=${MINIO_BACKEND_USER}"
+                  "minio-backend-password=${MINIO_BACKEND_PASSWORD}"
+                  "llm-auth-key=${AZURE_OPENAI_KEY}"
+                  "reverb-app-id=${REVERB_APP_ID}"
+                  "reverb-app-key=${REVERB_APP_KEY}"
+                  "reverb-app-secret=${REVERB_APP_SECRET}"
+                )
+
+                if az containerapp show --name "$BACKEND_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
+                  az containerapp secret set \
+                    --name "$BACKEND_APP" --resource-group "$RESOURCE_GROUP" --secrets "${SECRETS[@]}"
+                  az containerapp registry set \
+                    --name "$BACKEND_APP" --resource-group "$RESOURCE_GROUP" \
+                    --server "$ACR_LOGIN_SERVER" --identity system
+                  # php-fpm speaks fastcgi: plain TCP ingress, reachable as <app>:9000
+                  az containerapp ingress enable \
+                    --name "$BACKEND_APP" --resource-group "$RESOURCE_GROUP" \
+                    --type internal --transport tcp --target-port 9000 --exposed-port 9000
+                  az containerapp update \
+                    --name "$BACKEND_APP" --resource-group "$RESOURCE_GROUP" \
+                    --image "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:$IMAGE_TAG" \
+                    --set-env-vars "${ENV_VARS[@]}"
+                else
+                  az containerapp create \
+                    --name "$BACKEND_APP" --resource-group "$RESOURCE_GROUP" \
                     --environment "$CONTAINER_APP_ENV" \
                     --image "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:$IMAGE_TAG" \
                     --registry-server "$ACR_LOGIN_SERVER" --registry-identity system \
-                    --ingress external --target-port 8080 --transport auto \
+                    --ingress internal --transport tcp --target-port 9000 --exposed-port 9000 \
                     --secrets "${SECRETS[@]}" \
                     --env-vars "${ENV_VARS[@]}" \
-                    --command "sh" --args "-c" "php /app/artisan config:cache && php /app/artisan reverb:start" \
-                    --cpu 0.5 --memory 1.0Gi --min-replicas 1 --max-replicas 1
+                    --cpu 1.0 --memory 2.0Gi \
+                    --min-replicas 1 --max-replicas 1
                 fi
-                az containerapp show --name "$REVERB_APP" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1 \
-                  || { echo "##[error]Reverb app '$REVERB_APP' does not exist after deploy."; exit 1; }
 
           - task: AzureCLI@2
-            displayName: Deploy frontend
+            displayName: Deploy nginx front door (public entrypoint)
             env:
               IMAGE_TAG: $(Build.BuildId)
-              FRONTEND_IMAGE: $(FRONTEND_IMAGE)
-              FRONTEND_APP: $(FRONTEND_APP)
+              NGINX_APP: $(NGINX_APP)
+              NGINX_IMAGE: $(NGINX_IMAGE)
               BACKEND_APP: $(BACKEND_APP)
+              FRONTEND_APP: $(FRONTEND_APP)
+              REVERB_APP: $(REVERB_APP)
               RESOURCE_GROUP: $(RESOURCE_GROUP)
               CONTAINER_APP_ENV: $(CONTAINER_APP_ENV)
             inputs:
@@ -1146,43 +900,42 @@ stages:
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
+                set -e
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
-                [ -n "$ACR_LOGIN_SERVER" ] || { echo "##[error]No ACR found in resource group $RESOURCE_GROUP"; exit 1; }
+                ENV_DOMAIN=$(az containerapp env show --name "$CONTAINER_APP_ENV" --resource-group "$RESOURCE_GROUP" \
+                  --query properties.defaultDomain -o tsv)
 
-                BACKEND_FQDN=$(az containerapp show \
-                  --name "$BACKEND_APP" \
-                  --resource-group "$RESOURCE_GROUP" \
-                  --query "properties.configuration.ingress.fqdn" -o tsv)
-                [ -n "$BACKEND_FQDN" ] || { echo "##[error]Backend app '$BACKEND_APP' not found — its deploy step must succeed first."; exit 1; }
-                BACKEND_URL="https://${BACKEND_FQDN}"
+                ENV_VARS=(
+                  "BACKEND_FASTCGI=${BACKEND_APP}:9000"
+                  "REVERB_UPSTREAM=https://${REVERB_APP}.internal.${ENV_DOMAIN}"
+                  "FRONTEND_UPSTREAM=https://${FRONTEND_APP}.internal.${ENV_DOMAIN}"
+                )
 
-                if az containerapp show --name "$FRONTEND_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
+                if az containerapp show --name "$NGINX_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
                   az containerapp registry set \
-                    --name "$FRONTEND_APP" \
-                    --resource-group "$RESOURCE_GROUP" \
-                    --server "$ACR_LOGIN_SERVER" \
-                    --identity system
-                  az containerapp ingress update \
-                    --name "$FRONTEND_APP" \
-                    --resource-group "$RESOURCE_GROUP" \
-                    --target-port 5173
+                    --name "$NGINX_APP" --resource-group "$RESOURCE_GROUP" \
+                    --server "$ACR_LOGIN_SERVER" --identity system
+                  az containerapp ingress enable \
+                    --name "$NGINX_APP" --resource-group "$RESOURCE_GROUP" \
+                    --type external --target-port 80 --transport auto
                   az containerapp update \
-                    --name "$FRONTEND_APP" \
-                    --resource-group "$RESOURCE_GROUP" \
-                    --image "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:$IMAGE_TAG" \
-                    --min-replicas 1 \
-                    --set-env-vars "BACKEND_URL=${BACKEND_URL}"
+                    --name "$NGINX_APP" --resource-group "$RESOURCE_GROUP" \
+                    --image "$ACR_LOGIN_SERVER/$NGINX_IMAGE:$IMAGE_TAG" \
+                    --set-env-vars "${ENV_VARS[@]}"
                 else
                   az containerapp create \
-                    --name "$FRONTEND_APP" \
-                    --resource-group "$RESOURCE_GROUP" \
+                    --name "$NGINX_APP" --resource-group "$RESOURCE_GROUP" \
                     --environment "$CONTAINER_APP_ENV" \
-                    --image "$ACR_LOGIN_SERVER/$FRONTEND_IMAGE:$IMAGE_TAG" \
-                    --registry-server "$ACR_LOGIN_SERVER" \
-                    --registry-identity system \
-                    --ingress external \
-                    --target-port 5173 \
-                    --env-vars "BACKEND_URL=${BACKEND_URL}" \
+                    --image "$ACR_LOGIN_SERVER/$NGINX_IMAGE:$IMAGE_TAG" \
+                    --registry-server "$ACR_LOGIN_SERVER" --registry-identity system \
+                    --ingress external --target-port 80 --transport auto \
+                    --env-vars "${ENV_VARS[@]}" \
                     --cpu 0.25 --memory 0.5Gi \
-                    --min-replicas 1 --max-replicas 3
+                    --min-replicas 1 --max-replicas 1
                 fi
+
+                FQDN=$(az containerapp show --name "$NGINX_APP" --resource-group "$RESOURCE_GROUP" \
+                  --query "properties.configuration.ingress.fqdn" -o tsv)
+                echo "=========================================="
+                echo "  KDAI is live at: https://${FQDN}"
+                echo "=========================================="

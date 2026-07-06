@@ -1,0 +1,4 @@
+# websockets pinned to the same major as ATTS-CSP (13.x legacy serve API is used)
+websockets==13.1
+numpy>=1.26
+azure-cognitiveservices-speech>=1.40,<2
