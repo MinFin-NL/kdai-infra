@@ -104,6 +104,35 @@ stages:
                   echo "##[warning]ProcessQuestionExtractionJob.php not found; skipped Bearer patch"
                 fi
 
+                # PIPELINE PATCH (app repo is read-only): raise the emulation-upload cap
+                # from 100MB to 2GB. Three idempotent backend gates:
+                #  - php-fpm post_max_size / upload_max_filesize (the fpm pool config,
+                #    COPYed to www.conf in the backend Dockerfile), plus a generous
+                #    max_execution_time so storing a 2GB file to MinIO doesn't abort.
+                #  - Laravel's file "max" rule (kilobytes) on uploadEmulationFile.
+                #  - the Dutch over-limit message shown to the user.
+                PHPFPM="$SRC/php-fpm.conf"
+                if [ -f "$PHPFPM" ]; then
+                  sed -i 's/^php_value\[post_max_size\] = .*/php_value[post_max_size] = 2048M/' "$PHPFPM"
+                  sed -i 's/^php_value\[upload_max_filesize\] = .*/php_value[upload_max_filesize] = 2048M/' "$PHPFPM"
+                  if grep -q 'php_value\[max_execution_time\]' "$PHPFPM"; then
+                    sed -i 's/^php_value\[max_execution_time\] = .*/php_value[max_execution_time] = 600/' "$PHPFPM"
+                  else
+                    printf 'php_value[max_execution_time] = 600\n' >> "$PHPFPM"
+                  fi
+                else
+                  echo "##[warning]php-fpm.conf not found; skipped upload-size patch"
+                fi
+
+                DEBATE_CTRL="$SRC/app/Http/Controllers/DebateControllers/DebateController.php"
+                if [ -f "$DEBATE_CTRL" ]; then
+                  # 2GB in KB (2*1024*1024) for Laravel's file "max" rule.
+                  sed -i 's/|max:102400|/|max:2097152|/' "$DEBATE_CTRL"
+                  sed -i 's/Bestand mag maximaal 100MB zijn!/Bestand mag maximaal 2GB zijn!/' "$DEBATE_CTRL"
+                else
+                  echo "##[warning]DebateController.php not found; skipped upload-size patch"
+                fi
+
                 # BUILD HOTFIX: the CCoE pool's unauthenticated GitHub codeload path is
                 # rate-limited, which breaks composer dist downloads. Composer reads a
                 # project-level auth.json from the working dir, so copy one in right
@@ -159,6 +188,26 @@ stages:
                 set -e
                 SRC="$(Build.SourcesDirectory)/kdai3/frontend"
                 [ -d "$SRC" ] || { echo "##[error]kdai3/frontend not found in checkout"; exit 1; }
+
+                # PIPELINE PATCH (app repo is read-only): raise the client-side emulation
+                # upload cap from 100MB to 2GB so the browser doesn't reject the file
+                # before it reaches the backend. Only AUDIO_FILE_CONFIG (100MB) is touched
+                # — the 10MB DEBATE_FILE_CONFIG is left alone — plus the two "100MB" hints
+                # shown in the EmulationTab UI.
+                FILEVAL="$SRC/src/utils/fileValidation.ts"
+                if [ -f "$FILEVAL" ]; then
+                  sed -i 's#maxSizeBytes: 100 \* 1024 \* 1024, // 100MB#maxSizeBytes: 2048 * 1024 * 1024, // 2GB#' "$FILEVAL"
+                else
+                  echo "##[warning]fileValidation.ts not found; skipped client upload-size patch"
+                fi
+                EMUTAB="$SRC/src/components/debate/EmulationTab.vue"
+                if [ -f "$EMUTAB" ]; then
+                  sed -i 's/maximale bestandsgrootte van 100MB/maximale bestandsgrootte van 2GB/' "$EMUTAB"
+                  sed -i 's/Maximaal 100MB\./Maximaal 2GB./' "$EMUTAB"
+                else
+                  echo "##[warning]EmulationTab.vue not found; skipped upload-size text patch"
+                fi
+
                 for v in REVERB_APP_ID REVERB_APP_KEY; do
                   case "${!v}" in
                     ""|'$('*) echo "##[error]$v is not set in the kdai-secrets variable group"; exit 1 ;;

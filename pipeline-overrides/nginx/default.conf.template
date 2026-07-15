@@ -6,7 +6,7 @@ server {
     listen 80;
     server_name _;
 
-    client_max_body_size 100M;
+    client_max_body_size 2048M;
 
     # API routes - Laravel via PHP-FPM (fastcgi over the backend's TCP ingress)
     location /api/ {
@@ -19,9 +19,11 @@ server {
         fastcgi_param REQUEST_URI $uri?$args;
         # TLS is terminated by Container Apps ingress; tell Laravel it is https.
         fastcgi_param HTTPS on;
-        fastcgi_read_timeout 300s;
+        # Large emulation uploads (up to 2GB) can take a while to buffer to nginx
+        # and stream on to MinIO, so give php-fpm generous read/send windows.
+        fastcgi_read_timeout 600s;
         fastcgi_connect_timeout 75s;
-        fastcgi_send_timeout 300s;
+        fastcgi_send_timeout 600s;
     }
 
     # WebSocket (Reverb) — proxied to the Reverb app's internal https ingress.
