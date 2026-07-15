@@ -423,7 +423,14 @@ stages:
                 [ -n "$MINIO_FQDN" ] || { echo "##[error]MinIO app '$MINIO_APP' has no ingress FQDN"; exit 1; }
 
                 # Jobs are stateless: recreate for a deterministic spec (update flags for
-                # jobs are patchy across CLI versions).
+                # jobs are patchy across CLI versions). NOTE: the one-shot
+                # `job create --registry-identity system` is unreliable for JOBS — it fails
+                # to wire ACR pull, silently drops --image (leaving the job on the
+                # mcr.microsoft.com/k8se/quickstart placeholder with registries=null) and
+                # exits non-zero, which fails this step. So create on a public placeholder
+                # with a system identity (always succeeds, no ACR pull needed yet), then
+                # grant AcrPull + set the registry to that identity + swap in the real image
+                # — the same machinery the working app deploys use (registry set / update).
                 if az containerapp job show --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
                   az containerapp job delete --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP" --yes
                 fi
@@ -432,8 +439,8 @@ stages:
                   --environment "$CONTAINER_APP_ENV" \
                   --trigger-type Manual --replica-timeout 900 --replica-retry-limit 1 \
                   --parallelism 1 --replica-completion-count 1 \
-                  --image "$ACR_LOGIN_SERVER/$MINIO_INIT_IMAGE:$IMAGE_TAG" \
-                  --registry-server "$ACR_LOGIN_SERVER" --registry-identity system \
+                  --image "mcr.microsoft.com/k8se/quickstart:latest" \
+                  --mi-system-assigned \
                   --cpu 0.25 --memory 0.5Gi \
                   --secrets \
                     "minio-root-user=${MINIO_ROOT_USER}" \
@@ -453,6 +460,22 @@ stages:
                     "MINIO_CSP_PASSWORD=secretref:minio-csp-password" \
                     "MINIO_BACKEND_USER=secretref:minio-backend-user" \
                     "MINIO_BACKEND_PASSWORD=secretref:minio-backend-password"
+
+                # Grant the job's (fresh) system identity pull access, point the ACR registry
+                # at that identity, then swap the placeholder for the real image. `registry set`
+                # also grants AcrPull, but the explicit role assignment makes a fresh-identity
+                # recreate deterministic (|| true tolerates an already-existing assignment).
+                JOB_PRINCIPAL_ID=$(az containerapp job show --name "$MINIO_INIT_JOB" \
+                  --resource-group "$RESOURCE_GROUP" --query "identity.principalId" -o tsv)
+                ACR_ID=$(az acr show --name "${ACR_LOGIN_SERVER%%.*}" --query id -o tsv)
+                az role assignment create --assignee-object-id "$JOB_PRINCIPAL_ID" \
+                  --assignee-principal-type ServicePrincipal --role AcrPull --scope "$ACR_ID" \
+                  --only-show-errors >/dev/null 2>&1 || true
+                az containerapp job registry set --name "$MINIO_INIT_JOB" \
+                  --resource-group "$RESOURCE_GROUP" --server "$ACR_LOGIN_SERVER" --identity system
+                az containerapp job update --name "$MINIO_INIT_JOB" \
+                  --resource-group "$RESOURCE_GROUP" \
+                  --image "$ACR_LOGIN_SERVER/$MINIO_INIT_IMAGE:$IMAGE_TAG"
 
                 az containerapp job start --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP"
                 echo "Waiting for MinIO init job to finish..."
