@@ -24,6 +24,12 @@ server {
         fastcgi_read_timeout 600s;
         fastcgi_connect_timeout 75s;
         fastcgi_send_timeout 600s;
+        # Stream the request body straight to php-fpm instead of first buffering the
+        # whole thing to a temp file on nginx's small ephemeral disk (this app runs at
+        # 0.25 vCPU, ~1GB /tmp - a 2GB body would fill it and the upload would die on
+        # nginx before ever reaching the backend). php-fpm writes its own upload temp
+        # on the backend (1 vCPU, ~4GB), which fits 2GB.
+        fastcgi_request_buffering off;
     }
 
     # WebSocket (Reverb) — proxied to the Reverb app's internal https ingress.

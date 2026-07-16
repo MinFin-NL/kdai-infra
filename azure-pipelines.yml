@@ -115,6 +115,14 @@ stages:
                 if [ -f "$PHPFPM" ]; then
                   sed -i 's/^php_value\[post_max_size\] = .*/php_value[post_max_size] = 2048M/' "$PHPFPM"
                   sed -i 's/^php_value\[upload_max_filesize\] = .*/php_value[upload_max_filesize] = 2048M/' "$PHPFPM"
+                  # The upstream php-fpm.conf's last line has NO trailing newline, so a
+                  # bare `printf >>` concatenates onto it, producing a malformed
+                  # `...= 2048Mphp_value[max_execution_time] = 600` directive. php-fpm then
+                  # fails to parse www.conf ("unexpected '='", exit 78) and the whole
+                  # backend revision goes ActivationFailed - traffic silently stays on the
+                  # previous revision (old 100MB cap -> large uploads 502 "broken pipe").
+                  # Guarantee a trailing newline before appending (idempotent).
+                  [ -n "$(tail -c1 "$PHPFPM")" ] && printf '\n' >> "$PHPFPM"
                   if grep -q 'php_value\[max_execution_time\]' "$PHPFPM"; then
                     sed -i 's/^php_value\[max_execution_time\] = .*/php_value[max_execution_time] = 600/' "$PHPFPM"
                   else
