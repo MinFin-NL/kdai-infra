@@ -94,15 +94,43 @@ stages:
                 SRC="$(Build.SourcesDirectory)/kdai3/backend"
                 [ -d "$SRC" ] || { echo "##[error]kdai3/backend not found in checkout"; exit 1; }
 
-                # PIPELINE PATCH (app repo is read-only): the QES job sends the LLM key as
+                # PIPELINE PATCH (app repo is read-only): the QES jobs send the LLM key as
                 # 'Authorization: Token <key>' (VLAM convention). Azure OpenAI's
                 # OpenAI-compatible endpoint requires 'Bearer'. Idempotent sed.
-                QES_JOB="$SRC/app/Jobs/ProcessQuestionExtractionJob.php"
-                if [ -f "$QES_JOB" ]; then
-                  sed -i "s/'Token '\./'Bearer './" "$QES_JOB"
-                else
-                  echo "##[warning]ProcessQuestionExtractionJob.php not found; skipped Bearer patch"
-                fi
+                # (AnswerSuggestionService already uses Bearer upstream.)
+                for f in ProcessQuestionExtractionJob EscalateQuestionExtractionJob; do
+                  QES_JOB="$SRC/app/Jobs/$f.php"
+                  if [ -f "$QES_JOB" ]; then
+                    sed -i "s/'Token '\./'Bearer './" "$QES_JOB"
+                  else
+                    echo "##[warning]$f.php not found; skipped Bearer patch"
+                  fi
+                done
+
+                # PIPELINE PATCH (app repo is read-only): the reasoning-era Azure OpenAI
+                # deployment (gpt-5.3-chat) rejects an explicit `temperature`:
+                #   400 unsupported_value - "Unsupported value: 'temperature' does not
+                #   support 0 with this model. Only the default (1) value is supported."
+                # VLAM accepted temperature 0/0.1, so kdai3 sends it on every LLM call and
+                # every QES extraction 400s -> the job burns its 3 tries and no question is
+                # ever created, leaving the QES screen permanently empty while the
+                # transcription screen looks fine. Drop the parameter entirely (rather than
+                # pinning it to 1) so this survives deployments that reject the key itself.
+                # Idempotent: the line is gone after the first pass.
+                for rel in app/Jobs/ProcessQuestionExtractionJob.php \
+                           app/Jobs/EscalateQuestionExtractionJob.php \
+                           app/Services/AnswerSuggestionService.php; do
+                  LLM_CALLER="$SRC/$rel"
+                  if [ -f "$LLM_CALLER" ]; then
+                    sed -i "/^ *'temperature' => [0-9.]\+,/d" "$LLM_CALLER"
+                    if grep -q "'temperature' =>" "$LLM_CALLER"; then
+                      echo "##[error]$rel still sends 'temperature' after patch; Azure OpenAI will 400"
+                      exit 1
+                    fi
+                  else
+                    echo "##[warning]$rel not found; skipped temperature patch"
+                  fi
+                done
 
                 # PIPELINE PATCH (app repo is read-only): raise the emulation-upload cap
                 # from 100MB to 2GB. Three idempotent backend gates:
@@ -767,7 +795,18 @@ stages:
                   "REVERB_SERVER_HOST=0.0.0.0"
                   "REVERB_SERVER_PORT=8081"
                   "REVERB_SERVER_PATH=/app"
-                  "REVERB_SCALING_ENABLED=true"
+                  # Keep scaling OFF for this single-replica Reverb app (min=max=1). With it
+                  # ON, Reverb opens a Redis pub/sub subscriber; on the CAE's intermittent
+                  # ca-kdai-redis-inno-d DNS/NXDOMAIN blips it throws RedisConnectionException
+                  # after retrying 60s and the whole websocket server EXITS - so live
+                  # transcript segments never reach the browser even though CSP + the ATTS
+                  # listener are producing them fine. A single instance needs no Redis fan-out.
+                  "REVERB_SCALING_ENABLED=false"
+                  # Reverb only touches the cache for its `reverb:restart` signal. With no
+                  # CACHE_STORE the reverb image defaults to the DATABASE (sqlite) store and
+                  # crashes at boot ("database.sqlite does not exist") - this app has no DB.
+                  # A single in-memory instance needs none: use the array store.
+                  "CACHE_STORE=array"
                   "REDIS_HOST=${REDIS_APP}"
                   "REDIS_PORT=6379"
                   "REDIS_CLIENT=predis"
@@ -923,7 +962,10 @@ stages:
                   # in-container reverb process then binds :443 too — harmless, unused.
                   "REVERB_SERVER_PORT=443"
                   "REVERB_SERVER_PATH=/app"
-                  "REVERB_SCALING_ENABLED=true"
+                  # Off: the backend's in-container reverb (supervisord) is unused - real
+                  # websockets run in the dedicated ca-kdai-reverb app. Scaling ON only makes
+                  # this unused server crash-loop on Redis pub/sub (see the Reverb app note).
+                  "REVERB_SCALING_ENABLED=false"
                   "REDIS_HOST=${REDIS_APP}"
                   "REDIS_PORT=6379"
                   "REDIS_CLIENT=predis"
