@@ -5,7 +5,7 @@
 # NOTE: the mc image is ubi-micro based — no sed/coreutils, so CRLF
 # normalization of init_minio.sh happens on the build agent (pipeline step)
 # before `docker build`, not in here.
-FROM minio/mc:RELEASE.2025-08-13T08-35-41Z
+FROM quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
 
 COPY . /minio_setup
 
