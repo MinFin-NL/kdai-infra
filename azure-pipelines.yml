@@ -474,49 +474,59 @@ stages:
                   --query "properties.configuration.ingress.fqdn" -o tsv)
                 [ -n "$MINIO_FQDN" ] || { echo "##[error]MinIO app '$MINIO_APP' has no ingress FQDN"; exit 1; }
 
-                # Jobs are stateless: recreate for a deterministic spec (update flags for
-                # jobs are patchy across CLI versions). NOTE: the one-shot
-                # `job create --registry-identity system` is unreliable for JOBS — it fails
-                # to wire ACR pull, silently drops --image (leaving the job on the
-                # mcr.microsoft.com/k8se/quickstart placeholder with registries=null) and
-                # exits non-zero, which fails this step. So create on a public placeholder
-                # with a system identity (always succeeds, no ACR pull needed yet), then
-                # grant AcrPull + set the registry to that identity + swap in the real image
-                # — the same machinery the working app deploys use (registry set / update).
-                if az containerapp job show --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
-                  az containerapp job delete --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP" --yes
-                fi
-                az containerapp job create \
-                  --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP" \
-                  --environment "$CONTAINER_APP_ENV" \
-                  --trigger-type Manual --replica-timeout 900 --replica-retry-limit 1 \
-                  --parallelism 1 --replica-completion-count 1 \
-                  --image "mcr.microsoft.com/k8se/quickstart:latest" \
-                  --mi-system-assigned \
-                  --cpu 0.25 --memory 0.5Gi \
-                  --secrets \
-                    "minio-root-user=${MINIO_ROOT_USER}" \
-                    "minio-root-password=${MINIO_ROOT_PASSWORD}" \
-                    "minio-csp-user=${MINIO_CSP_USER}" \
-                    "minio-csp-password=${MINIO_CSP_PASSWORD}" \
-                    "minio-backend-user=${MINIO_BACKEND_USER}" \
-                    "minio-backend-password=${MINIO_BACKEND_PASSWORD}" \
-                  --env-vars \
-                    "MINIO_INIT_HOST=https://${MINIO_FQDN}" \
-                    "MINIO_DEBATE_BUCKET_NAME=debates" \
-                    "MINIO_FULL_POLICY_FILE_NAME=full_policy.json" \
-                    "MINIO_RESTRICTED_POLICY_FILE_NAME=restricted_policy.json" \
-                    "MINIO_ROOT_USER=secretref:minio-root-user" \
-                    "MINIO_ROOT_PASSWORD=secretref:minio-root-password" \
-                    "MINIO_CSP_USER=secretref:minio-csp-user" \
-                    "MINIO_CSP_PASSWORD=secretref:minio-csp-password" \
-                    "MINIO_BACKEND_USER=secretref:minio-backend-user" \
-                    "MINIO_BACKEND_PASSWORD=secretref:minio-backend-password"
+                JOB_SECRETS=(
+                  "minio-root-user=${MINIO_ROOT_USER}"
+                  "minio-root-password=${MINIO_ROOT_PASSWORD}"
+                  "minio-csp-user=${MINIO_CSP_USER}"
+                  "minio-csp-password=${MINIO_CSP_PASSWORD}"
+                  "minio-backend-user=${MINIO_BACKEND_USER}"
+                  "minio-backend-password=${MINIO_BACKEND_PASSWORD}"
+                )
+                JOB_ENV=(
+                  "MINIO_INIT_HOST=https://${MINIO_FQDN}"
+                  "MINIO_DEBATE_BUCKET_NAME=debates"
+                  "MINIO_FULL_POLICY_FILE_NAME=full_policy.json"
+                  "MINIO_RESTRICTED_POLICY_FILE_NAME=restricted_policy.json"
+                  "MINIO_ROOT_USER=secretref:minio-root-user"
+                  "MINIO_ROOT_PASSWORD=secretref:minio-root-password"
+                  "MINIO_CSP_USER=secretref:minio-csp-user"
+                  "MINIO_CSP_PASSWORD=secretref:minio-csp-password"
+                  "MINIO_BACKEND_USER=secretref:minio-backend-user"
+                  "MINIO_BACKEND_PASSWORD=secretref:minio-backend-password"
+                )
 
-                # Grant the job's (fresh) system identity pull access, point the ACR registry
-                # at that identity, then swap the placeholder for the real image. `registry set`
-                # also grants AcrPull, but the explicit role assignment makes a fresh-identity
-                # recreate deterministic (|| true tolerates an already-existing assignment).
+                # Reuse the job across runs (create it only if missing) so its system identity
+                # and that identity's AcrPull grant stay stable. Deleting and recreating it every
+                # run (the old approach) gave it a NEW identity each time, which raced twice
+                # (build 82832): the create hit "Conflict ... pending delete" while the old
+                # identity was still being removed, and `job update --image` ran ~25s after the
+                # fresh AcrPull grant, before it had propagated ("unable to pull image using
+                # Managed identity system").
+                # NOTE: the one-shot `job create --registry-identity system` is unreliable for
+                # JOBS — it fails to wire ACR pull, silently drops --image (leaving the job on
+                # the mcr.microsoft.com/k8se/quickstart placeholder with registries=null) and
+                # exits non-zero. So a new job is created on that public placeholder with a
+                # system identity, then gets AcrPull + registry set + the real image below.
+                JOB_CREATED=false
+                if az containerapp job show --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
+                  az containerapp job secret set --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP" \
+                    --secrets "${JOB_SECRETS[@]}" --only-show-errors >/dev/null
+                else
+                  az containerapp job create \
+                    --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP" \
+                    --environment "$CONTAINER_APP_ENV" \
+                    --trigger-type Manual --replica-timeout 900 --replica-retry-limit 1 \
+                    --parallelism 1 --replica-completion-count 1 \
+                    --image "mcr.microsoft.com/k8se/quickstart:latest" \
+                    --mi-system-assigned \
+                    --cpu 0.25 --memory 0.5Gi \
+                    --secrets "${JOB_SECRETS[@]}" \
+                    --env-vars "${JOB_ENV[@]}"
+                  JOB_CREATED=true
+                fi
+
+                # Idempotent on a reused job: make sure the system identity can pull from ACR
+                # (|| true tolerates an already-existing assignment; `registry set` also grants it).
                 JOB_PRINCIPAL_ID=$(az containerapp job show --name "$MINIO_INIT_JOB" \
                   --resource-group "$RESOURCE_GROUP" --query "identity.principalId" -o tsv)
                 ACR_ID=$(az acr show --name "${ACR_LOGIN_SERVER%%.*}" --query id -o tsv)
@@ -525,15 +535,38 @@ stages:
                   --only-show-errors >/dev/null 2>&1 || true
                 az containerapp job registry set --name "$MINIO_INIT_JOB" \
                   --resource-group "$RESOURCE_GROUP" --server "$ACR_LOGIN_SERVER" --identity system
-                az containerapp job update --name "$MINIO_INIT_JOB" \
-                  --resource-group "$RESOURCE_GROUP" \
-                  --image "$ACR_LOGIN_SERVER/$MINIO_INIT_IMAGE:$IMAGE_TAG"
 
-                az containerapp job start --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP"
-                echo "Waiting for MinIO init job to finish..."
+                # Swap in this build's image and re-apply the spec (a reused job keeps whatever it
+                # had, so env vars are replaced wholesale). Only a just-created job has a fresh
+                # AcrPull grant that may not have propagated yet, so only that case waits and retries.
+                update_job() {
+                  az containerapp job update --name "$MINIO_INIT_JOB" \
+                    --resource-group "$RESOURCE_GROUP" \
+                    --image "$ACR_LOGIN_SERVER/$MINIO_INIT_IMAGE:$IMAGE_TAG" \
+                    --replica-timeout 900 --replica-retry-limit 1 --parallelism 1 \
+                    --cpu 0.25 --memory 0.5Gi \
+                    --replace-env-vars "${JOB_ENV[@]}"
+                }
+                if [ "$JOB_CREATED" = true ]; then
+                  for attempt in 1 2 3 4 5 6; do
+                    update_job && break
+                    [ "$attempt" -lt 6 ] || { echo "##[error]New job still can't pull from ACR after AcrPull grant"; exit 1; }
+                    echo "##[warning]New job's AcrPull grant not effective yet (attempt $attempt/6); retrying in 30s"
+                    sleep 30
+                  done
+                else
+                  update_job
+                fi
+
+                # Track THIS run's execution by name: the reused job keeps its execution history,
+                # so "the first execution in the list" may be an older, already-finished one.
+                EXECUTION=$(az containerapp job start --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP" \
+                  --query name -o tsv)
+                [ -n "$EXECUTION" ] || { echo "##[error]job start returned no execution name"; exit 1; }
+                echo "Waiting for MinIO init job execution $EXECUTION to finish..."
                 for i in $(seq 1 30); do
-                  STATUS=$(az containerapp job execution list --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP" \
-                    --query "[0].properties.status" -o tsv 2>/dev/null || true)
+                  STATUS=$(az containerapp job execution show --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP" \
+                    --job-execution-name "$EXECUTION" --query "properties.status" -o tsv 2>/dev/null || true)
                   echo "  attempt $i: $STATUS"
                   [ "$STATUS" = "Succeeded" ] && break
                   if [ "$STATUS" = "Failed" ]; then
