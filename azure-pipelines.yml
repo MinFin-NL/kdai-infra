@@ -174,7 +174,9 @@ stages:
                 # and infra commits as the working 2026-08-17 build), and after that every /api/
                 # request 502'd: nginx gets "Connection reset by peer" from the fastcgi TCP
                 # ingress even though php-fpm logs the request as completed. Rolled back to the
-                # last known-good version while that is investigated. Idempotent; hard-fails if
+                # last known-good version while that is investigated. The PHP pin alone did NOT
+                # fix it (nginx was pinned too, see pipeline-overrides/nginx/Dockerfile); keep
+                # it until the real cause is known. Idempotent; hard-fails if
                 # upstream changes its FROM line so the pin can't lapse silently.
                 PHP_BASE="php:8.4.24-fpm"
                 sed -i "s#^FROM php:8\.4-fpm\$#FROM $PHP_BASE#" "$SRC/Dockerfile"
