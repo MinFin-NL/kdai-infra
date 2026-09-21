@@ -410,7 +410,7 @@ stages:
                     ""|'$('*) echo "##[error]$v is not set in the kdai-secrets variable group"; exit 1 ;;
                   esac
                 done
-                MINIO_IMG="docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z"
+                MINIO_IMG="quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z"
 
                 if az containerapp show --name "$MINIO_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
                   az containerapp secret set \
