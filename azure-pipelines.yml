@@ -169,6 +169,20 @@ stages:
                   echo "##[warning]DebateController.php not found; skipped upload-size patch"
                 fi
 
+                # PIPELINE PATCH (app repo is read-only): pin the PHP base image. The floating
+                # `php:8.4-fpm` tag moved 8.4.24 -> 8.4.25 on the 2026-09-16 rebuild (same kdai3
+                # and infra commits as the working 2026-08-17 build), and after that every /api/
+                # request 502'd: nginx gets "Connection reset by peer" from the fastcgi TCP
+                # ingress even though php-fpm logs the request as completed. Rolled back to the
+                # last known-good version while that is investigated. Idempotent; hard-fails if
+                # upstream changes its FROM line so the pin can't lapse silently.
+                PHP_BASE="php:8.4.24-fpm"
+                sed -i "s#^FROM php:8\.4-fpm\$#FROM $PHP_BASE#" "$SRC/Dockerfile"
+                if ! grep -qx "FROM $PHP_BASE" "$SRC/Dockerfile"; then
+                  echo "##[error]backend Dockerfile base not pinned to $PHP_BASE (upstream FROM changed?)"
+                  exit 1
+                fi
+
                 # BUILD HOTFIX: the CCoE pool's unauthenticated GitHub codeload path is
                 # rate-limited, which breaks composer dist downloads. Composer reads a
                 # project-level auth.json from the working dir, so copy one in right
