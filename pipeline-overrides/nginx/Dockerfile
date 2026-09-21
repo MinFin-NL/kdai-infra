@@ -5,10 +5,10 @@
 #   REVERB_UPSTREAM   e.g. https://ca-kdai-reverb-inno-d.internal.<domain>
 #   FRONTEND_UPSTREAM e.g. https://ca-kdai-frontend-inno-d.internal.<domain>
 #
-# Pinned to the last known-good version. The 2026-09-16 rebuild pulled nginx:alpine
-# 1.31.6 (and php 8.4.25), after which every /api/ call 502'd with "Connection reset
-# by peer" on the fastcgi hop, while php-fpm logged each request as completed (200).
-# Rolling PHP back to 8.4.24 alone did not help, so nginx is the next suspect.
+# Temporarily pinned to the 2026-08-17 known-good version while the /api/ 502 was
+# diagnosed. Pinning nginx (1.31.3) and PHP (8.4.24) did NOT fix it; the cause is
+# the Container Apps TCP ingress (see the keep-conn note in default.conf.template).
+# Once keep-conn is confirmed working, this can go back to the floating nginx:alpine.
 FROM nginx:1.31.3-alpine
 
 COPY nginx-main.conf /etc/nginx/nginx.conf

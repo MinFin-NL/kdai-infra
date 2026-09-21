@@ -2,6 +2,21 @@
 # Only ${BACKEND_FASTCGI}, ${REVERB_UPSTREAM} and ${FRONTEND_UPSTREAM} are env
 # vars; $-variables like $http_upgrade are nginx runtime vars and are left alone
 # (the entrypoint only substitutes variables that exist in the environment).
+
+# php-fpm over the backend's Container Apps TCP ingress, with persistent connections.
+# Since the platform's 2026-09-18/19 replica moves, a reply is lost whenever php-fpm
+# closes the connection after answering (its default without keep-conn): php-fpm logs
+# 200, and nginx gets "recv() failed (104: Connection reset by peer) while reading response
+# header" -> 502 on every /api/ call. Rolling nginx/php back to the known-good versions
+# did not help, so it's the ingress. With fastcgi_keep_conn, php-fpm leaves the connection
+# open and nginx does the closing, like the Postgres/Redis clients on the same ingress,
+# which are unaffected. keepalive_timeout stays well below the ingress idle cut-off (~6 min).
+upstream kdai_backend {
+    server ${BACKEND_FASTCGI};
+    keepalive 8;
+    keepalive_timeout 60s;
+}
+
 server {
     listen 80;
     server_name _;
@@ -10,7 +25,8 @@ server {
 
     # API routes - Laravel via PHP-FPM (fastcgi over the backend's TCP ingress)
     location /api/ {
-        fastcgi_pass ${BACKEND_FASTCGI};
+        fastcgi_pass kdai_backend;
+        fastcgi_keep_conn on;
         fastcgi_index index.php;
         fastcgi_split_path_info ^(.+\.php)(/.+)$;
         include fastcgi_params;
