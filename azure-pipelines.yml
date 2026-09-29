@@ -3,8 +3,8 @@ trigger:
     include:
       - main
 
-# GitHub service connection must exist in Azure DevOps:
-# Project Settings → Service connections → GitHub → "github-kdai"
+# Needs the GitHub service connection "github-kdai" in Azure DevOps
+# (Project Settings > Service connections).
 resources:
   repositories:
     - repository: kdai3
@@ -22,7 +22,7 @@ variables:
     value: rg-kdai-inno-d
   - name: CONTAINER_APP_ENV
     value: cae-kdai-inno-d
-  # --- images ---
+  # images
   - name: BACKEND_IMAGE
     value: kdai-backend
   - name: REVERB_IMAGE
@@ -39,7 +39,7 @@ variables:
     value: kdai-m3u8-emulator
   - name: MINIO_INIT_IMAGE
     value: kdai-minio-init
-  # --- container apps ---
+  # container apps
   - name: POSTGRES_APP
     value: ca-kdai-postgres-inno-d
   - name: MINIO_APP
@@ -62,8 +62,8 @@ variables:
     value: ca-kdai-reverb-inno-d
   - name: NGINX_APP
     value: ca-kdai-nginx-inno-d
-  # Azure OpenAI chat deployment used as the LLM (questions/answer-suggestions).
-  # Kept in lockstep with the invulhulp app; lives on oai-kdai-inno-d.
+  # Azure OpenAI deployment on oai-kdai-inno-d for question extraction and answer
+  # suggestions. Keep it the same as the invulhulp app.
   - name: LLM_MODEL_DEPLOYMENT
     value: gpt-5.3-chat
 
@@ -94,10 +94,11 @@ stages:
                 SRC="$(Build.SourcesDirectory)/kdai3/backend"
                 [ -d "$SRC" ] || { echo "##[error]kdai3/backend not found in checkout"; exit 1; }
 
-                # PIPELINE PATCH (app repo is read-only): the QES jobs send the LLM key as
-                # 'Authorization: Token <key>' (VLAM convention). Azure OpenAI's
-                # OpenAI-compatible endpoint requires 'Bearer'. Idempotent sed.
-                # (AnswerSuggestionService already uses Bearer upstream.)
+                # Patches below are applied here because we can't change the kdai3 repo.
+
+                # The QES jobs send the LLM key as 'Authorization: Token <key>' (the VLAM
+                # convention). Azure OpenAI wants 'Bearer'. AnswerSuggestionService already
+                # uses Bearer.
                 for f in ProcessQuestionExtractionJob EscalateQuestionExtractionJob; do
                   QES_JOB="$SRC/app/Jobs/$f.php"
                   if [ -f "$QES_JOB" ]; then
@@ -107,16 +108,13 @@ stages:
                   fi
                 done
 
-                # PIPELINE PATCH (app repo is read-only): the reasoning-era Azure OpenAI
-                # deployment (gpt-5.3-chat) rejects an explicit `temperature`:
+                # gpt-5.3-chat rejects any temperature other than the default:
                 #   400 unsupported_value - "Unsupported value: 'temperature' does not
                 #   support 0 with this model. Only the default (1) value is supported."
-                # VLAM accepted temperature 0/0.1, so kdai3 sends it on every LLM call and
-                # every QES extraction 400s -> the job burns its 3 tries and no question is
-                # ever created, leaving the QES screen permanently empty while the
-                # transcription screen looks fine. Drop the parameter entirely (rather than
-                # pinning it to 1) so this survives deployments that reject the key itself.
-                # Idempotent: the line is gone after the first pass.
+                # kdai3 sends 0 or 0.1 (fine on VLAM), so every QES extraction fails all 3
+                # tries and the QES screen stays empty while transcription looks normal.
+                # The line is deleted instead of set to 1 in case a deployment rejects the
+                # parameter altogether.
                 for rel in app/Jobs/ProcessQuestionExtractionJob.php \
                            app/Jobs/EscalateQuestionExtractionJob.php \
                            app/Services/AnswerSuggestionService.php; do
@@ -132,24 +130,21 @@ stages:
                   fi
                 done
 
-                # PIPELINE PATCH (app repo is read-only): raise the emulation-upload cap
-                # from 100MB to 2GB. Three idempotent backend gates:
-                #  - php-fpm post_max_size / upload_max_filesize (the fpm pool config,
-                #    COPYed to www.conf in the backend Dockerfile), plus a generous
-                #    max_execution_time so storing a 2GB file to MinIO doesn't abort.
-                #  - Laravel's file "max" rule (kilobytes) on uploadEmulationFile.
-                #  - the Dutch over-limit message shown to the user.
+                # Raise the emulation upload limit from 100MB to 2GB. The backend checks it
+                # in three places:
+                #  - php-fpm post_max_size and upload_max_filesize (php-fpm.conf, copied to
+                #    www.conf by the backend Dockerfile), plus max_execution_time so writing
+                #    2GB to MinIO doesn't time out
+                #  - Laravel's "max" rule (in KB) on uploadEmulationFile
+                #  - the Dutch error message
                 PHPFPM="$SRC/php-fpm.conf"
                 if [ -f "$PHPFPM" ]; then
                   sed -i 's/^php_value\[post_max_size\] = .*/php_value[post_max_size] = 2048M/' "$PHPFPM"
                   sed -i 's/^php_value\[upload_max_filesize\] = .*/php_value[upload_max_filesize] = 2048M/' "$PHPFPM"
-                  # The upstream php-fpm.conf's last line has NO trailing newline, so a
-                  # bare `printf >>` concatenates onto it, producing a malformed
-                  # `...= 2048Mphp_value[max_execution_time] = 600` directive. php-fpm then
-                  # fails to parse www.conf ("unexpected '='", exit 78) and the whole
-                  # backend revision goes ActivationFailed - traffic silently stays on the
-                  # previous revision (old 100MB cap -> large uploads 502 "broken pipe").
-                  # Guarantee a trailing newline before appending (idempotent).
+                  # php-fpm.conf has no trailing newline. Appending to it directly gave
+                  # `...= 2048Mphp_value[max_execution_time] = 600`, php-fpm exited 78
+                  # ("unexpected '='") and the revision went ActivationFailed. Traffic stayed
+                  # on the old revision, so large uploads kept failing with 502 "broken pipe".
                   [ -n "$(tail -c1 "$PHPFPM")" ] && printf '\n' >> "$PHPFPM"
                   if grep -q 'php_value\[max_execution_time\]' "$PHPFPM"; then
                     sed -i 's/^php_value\[max_execution_time\] = .*/php_value[max_execution_time] = 600/' "$PHPFPM"
@@ -162,22 +157,18 @@ stages:
 
                 DEBATE_CTRL="$SRC/app/Http/Controllers/DebateControllers/DebateController.php"
                 if [ -f "$DEBATE_CTRL" ]; then
-                  # 2GB in KB (2*1024*1024) for Laravel's file "max" rule.
+                  # 2GB in KB
                   sed -i 's/|max:102400|/|max:2097152|/' "$DEBATE_CTRL"
                   sed -i 's/Bestand mag maximaal 100MB zijn!/Bestand mag maximaal 2GB zijn!/' "$DEBATE_CTRL"
                 else
                   echo "##[warning]DebateController.php not found; skipped upload-size patch"
                 fi
 
-                # PIPELINE PATCH (app repo is read-only): pin the PHP base image. The floating
-                # `php:8.4-fpm` tag moved 8.4.24 -> 8.4.25 on the 2026-09-16 rebuild (same kdai3
-                # and infra commits as the working 2026-08-17 build), and after that every /api/
-                # request 502'd: nginx gets "Connection reset by peer" from the fastcgi TCP
-                # ingress even though php-fpm logs the request as completed. Rolled back to the
-                # last known-good version while that is investigated. The PHP pin alone did NOT
-                # fix it (nginx was pinned too, see pipeline-overrides/nginx/Dockerfile); keep
-                # it until the real cause is known. Idempotent; hard-fails if
-                # upstream changes its FROM line so the pin can't lapse silently.
+                # Pin PHP to 8.4.24. The 2026-09-16 rebuild picked up 8.4.25 through the
+                # php:8.4-fpm tag, and every /api/ request started returning 502 with the same
+                # kdai3 and infra commits as the working 2026-08-17 build. Pinning didn't fix
+                # it (the cause was the TCP ingress, see pipeline-overrides/nginx), but the pin
+                # stays for now. Fails the build if upstream changes its FROM line.
                 PHP_BASE="php:8.4.24-fpm"
                 sed -i "s#^FROM php:8\.4-fpm\$#FROM $PHP_BASE#" "$SRC/Dockerfile"
                 if ! grep -qx "FROM $PHP_BASE" "$SRC/Dockerfile"; then
@@ -185,12 +176,11 @@ stages:
                   exit 1
                 fi
 
-                # BUILD HOTFIX: the CCoE pool's unauthenticated GitHub codeload path is
-                # rate-limited, which breaks composer dist downloads. Composer reads a
-                # project-level auth.json from the working dir, so copy one in right
-                # before `composer install` and strip it from the final layer.
-                # (Intermediate layers in the private ACR still contain it — acceptable
-                # for inno-d, the token is the pipeline's own.)
+                # Unauthenticated GitHub downloads from the CCoE pool get rate-limited and
+                # composer install fails. Composer reads auth.json from the working dir, so
+                # copy one in before `composer install` and delete it in the last layer.
+                # Earlier layers in ACR still have it. Fine for inno-d, it's the pipeline's
+                # own token.
                 if [ -n "$GITHUB_TOKEN" ] && [ "${GITHUB_TOKEN#\$(}" = "$GITHUB_TOKEN" ]; then
                   printf '{"github-oauth": {"github.com": "%s"}}\n' "$GITHUB_TOKEN" > "$SRC/auth.json"
                   sed -i 's#^RUN composer install#COPY auth.json ./auth.json\nRUN composer install#' "$SRC/Dockerfile"
@@ -208,10 +198,9 @@ stages:
                 docker push "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:$IMAGE_TAG"
                 docker push "$ACR_LOGIN_SERVER/$BACKEND_IMAGE:latest"
 
-                # Reverb variant: same code, but runs only the websocket server.
-                # A derived image (instead of a Container Apps command override) because
-                # the az CLI cannot pass command args that start with "--", and because
-                # this must skip docker-entrypoint.sh (no second migrate/seed race).
+                # Reverb image: the backend image running only the websocket server. It's a
+                # separate image because az can't pass command args starting with "--", and
+                # it has to skip docker-entrypoint.sh so migrate/seed doesn't run twice.
                 cat > /tmp/Dockerfile.reverb <<EOF
                 FROM $ACR_LOGIN_SERVER/$BACKEND_IMAGE:$IMAGE_TAG
                 ENTRYPOINT []
@@ -241,11 +230,9 @@ stages:
                 SRC="$(Build.SourcesDirectory)/kdai3/frontend"
                 [ -d "$SRC" ] || { echo "##[error]kdai3/frontend not found in checkout"; exit 1; }
 
-                # PIPELINE PATCH (app repo is read-only): raise the client-side emulation
-                # upload cap from 100MB to 2GB so the browser doesn't reject the file
-                # before it reaches the backend. Only AUDIO_FILE_CONFIG (100MB) is touched
-                # — the 10MB DEBATE_FILE_CONFIG is left alone — plus the two "100MB" hints
-                # shown in the EmulationTab UI.
+                # kdai3 patch: raise the client-side emulation upload limit to 2GB to match
+                # the backend. Only AUDIO_FILE_CONFIG changes (DEBATE_FILE_CONFIG stays at
+                # 10MB), plus the two "100MB" texts in EmulationTab.
                 FILEVAL="$SRC/src/utils/fileValidation.ts"
                 if [ -f "$FILEVAL" ]; then
                   sed -i 's#maxSizeBytes: 100 \* 1024 \* 1024, // 100MB#maxSizeBytes: 2048 * 1024 * 1024, // 2GB#' "$FILEVAL"
@@ -269,10 +256,9 @@ stages:
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
                 az acr login --name "${ACR_LOGIN_SERVER%%.*}"
 
-                # Everything is same-origin behind the nginx front door:
-                #  - VITE_API_BASE_URL=/api        → axios uses relative URLs
-                #  - VITE_REVERB_HOST=localhost    → echoService falls back to
-                #    location.hostname, so websockets go to wss://<nginx-fqdn>:443/app
+                # Everything is same-origin behind nginx. VITE_API_BASE_URL=/api makes axios
+                # use relative URLs. With VITE_REVERB_HOST=localhost, echoService uses
+                # location.hostname, so websockets go to wss://<nginx-fqdn>:443/app.
                 docker build \
                   --build-arg VITE_API_BASE_URL=/api \
                   --build-arg VITE_REVERB_APP_KEY="$REVERB_APP_KEY" \
@@ -317,23 +303,22 @@ stages:
                   docker push "$ACR_LOGIN_SERVER/$image:latest"
                 }
 
-                # nginx front door (infra-owned; envsubst-templated upstreams)
+                # nginx front door (lives in this repo)
                 build_push "$NGINX_IMAGE" "$OVERRIDE_ROOT/nginx"
 
-                # ATTS-CSP straight from the kdai3 repo — no patches needed:
-                # MINIO_SECURE is env-driven and the redis worker reconnects itself.
+                # ATTS-CSP from kdai3 as is. MINIO_SECURE comes from env and the redis
+                # worker reconnects by itself.
                 build_push "$CSP_IMAGE" "$KDAI3/services/ATTS-CSP"
 
-                # WhisperLive-protocol shim backed by Azure AI Speech (replaces the
-                # GPU-only ghcr.io/collabora/whisperlive-gpu image, CPU-only env).
+                # Azure AI Speech behind the WhisperLive protocol, in place of
+                # ghcr.io/collabora/whisperlive-gpu (there's no GPU here).
                 build_push "$WHISPERLIVE_IMAGE" "$OVERRIDE_ROOT/whisperlive-shim"
 
                 # M3U8 emulator (test stream)
                 build_push "$M3U8_IMAGE" "$KDAI3/services/M3U8-emulator"
 
-                # MinIO init job (bucket + per-service users/policies).
-                # Normalize CRLF on the agent — the mc image has no sed (ubi-micro),
-                # and a CRLF script is the known kdai3 Windows-checkout failure mode.
+                # MinIO init job: bucket, service users and policies. Strip CRLF here,
+                # the mc image has no sed and kdai3 checkouts from Windows have CRLF.
                 sed -i 's/\r$//' "$KDAI3/_storage/minio_setup/init_minio.sh"
                 build_push "$MINIO_INIT_IMAGE" -f "$OVERRIDE_ROOT/minio-init/Dockerfile" "$KDAI3/_storage/minio_setup"
 
@@ -412,7 +397,10 @@ stages:
                     ""|'$('*) echo "##[error]$v is not set in the kdai-secrets variable group"; exit 1 ;;
                   esac
                 done
-                MINIO_IMG="quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z"
+                # Silo is a community fork of MinIO (github.com/pgsty/silo): same S3 API, data
+                # format and MINIO_* env vars, but the binary is `silo`, so the command is set
+                # on update too. Otherwise the existing app keeps `minio server /data`.
+                MINIO_IMG="docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z"
 
                 if az containerapp show --name "$MINIO_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
                   az containerapp secret set \
@@ -421,6 +409,7 @@ stages:
                   az containerapp update \
                     --name "$MINIO_APP" --resource-group "$RESOURCE_GROUP" \
                     --image "$MINIO_IMG" \
+                    --command "silo" "server" "/data" \
                     --set-env-vars \
                       "MINIO_ROOT_USER=secretref:minio-root-user" \
                       "MINIO_ROOT_PASSWORD=secretref:minio-root-password"
@@ -429,7 +418,7 @@ stages:
                     --name "$MINIO_APP" --resource-group "$RESOURCE_GROUP" \
                     --environment "$CONTAINER_APP_ENV" \
                     --image "$MINIO_IMG" \
-                    --command "minio" "server" "/data" \
+                    --command "silo" "server" "/data" \
                     --ingress internal --target-port 9000 --transport auto \
                     --secrets "minio-root-user=${MINIO_ROOT_USER}" "minio-root-password=${MINIO_ROOT_PASSWORD}" \
                     --env-vars \
@@ -462,9 +451,8 @@ stages:
                 set -e
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
 
-                # Dedicated MinIO service accounts. If the variable group doesn't define
-                # them, fall back to deterministic usernames with the root password —
-                # fine for inno-d, add real entries for anything more.
+                # Per-service MinIO accounts. Without entries in the variable group, use
+                # fixed usernames with the root password. OK for inno-d only.
                 case "$MINIO_CSP_USER" in ""|'$('*) MINIO_CSP_USER="kdai-csp" ;; esac
                 case "$MINIO_CSP_PASSWORD" in ""|'$('*) MINIO_CSP_PASSWORD="$MINIO_ROOT_PASSWORD" ;; esac
                 case "$MINIO_BACKEND_USER" in ""|'$('*) MINIO_BACKEND_USER="kdai-backend" ;; esac
@@ -495,18 +483,16 @@ stages:
                   "MINIO_BACKEND_PASSWORD=secretref:minio-backend-password"
                 )
 
-                # Reuse the job across runs (create it only if missing) so its system identity
-                # and that identity's AcrPull grant stay stable. Deleting and recreating it every
-                # run (the old approach) gave it a NEW identity each time, which raced twice
-                # (build 82832): the create hit "Conflict ... pending delete" while the old
-                # identity was still being removed, and `job update --image` ran ~25s after the
-                # fresh AcrPull grant, before it had propagated ("unable to pull image using
-                # Managed identity system").
-                # NOTE: the one-shot `job create --registry-identity system` is unreliable for
-                # JOBS — it fails to wire ACR pull, silently drops --image (leaving the job on
-                # the mcr.microsoft.com/k8se/quickstart placeholder with registries=null) and
-                # exits non-zero. So a new job is created on that public placeholder with a
-                # system identity, then gets AcrPull + registry set + the real image below.
+                # The job is created once and reused, so its system identity and AcrPull
+                # grant don't change. Recreating it every run gave it a new identity each
+                # time, and build 82832 failed twice on that: create hit "Conflict ... pending
+                # delete" while the old identity was being removed, and `job update --image`
+                # ran ~25s after the AcrPull grant, before it applied ("unable to pull image
+                # using Managed identity system").
+                # `job create --registry-identity system` doesn't work for jobs: it skips the
+                # ACR pull setup, ignores --image (the job stays on the k8se/quickstart
+                # placeholder with registries=null) and exits non-zero. So the job starts on
+                # that public placeholder and gets AcrPull, the registry and the image below.
                 JOB_CREATED=false
                 if az containerapp job show --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
                   az containerapp job secret set --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP" \
@@ -525,8 +511,8 @@ stages:
                   JOB_CREATED=true
                 fi
 
-                # Idempotent on a reused job: make sure the system identity can pull from ACR
-                # (|| true tolerates an already-existing assignment; `registry set` also grants it).
+                # Grant AcrPull to the job's identity. `|| true` because the assignment already
+                # exists on a reused job.
                 JOB_PRINCIPAL_ID=$(az containerapp job show --name "$MINIO_INIT_JOB" \
                   --resource-group "$RESOURCE_GROUP" --query "identity.principalId" -o tsv)
                 ACR_ID=$(az acr show --name "${ACR_LOGIN_SERVER%%.*}" --query id -o tsv)
@@ -536,9 +522,9 @@ stages:
                 az containerapp job registry set --name "$MINIO_INIT_JOB" \
                   --resource-group "$RESOURCE_GROUP" --server "$ACR_LOGIN_SERVER" --identity system
 
-                # Swap in this build's image and re-apply the spec (a reused job keeps whatever it
-                # had, so env vars are replaced wholesale). Only a just-created job has a fresh
-                # AcrPull grant that may not have propagated yet, so only that case waits and retries.
+                # Set this build's image and replace all env vars (a reused job keeps its old
+                # ones). A new job's AcrPull grant can take a while to apply, so only a new job
+                # retries.
                 update_job() {
                   az containerapp job update --name "$MINIO_INIT_JOB" \
                     --resource-group "$RESOURCE_GROUP" \
@@ -558,8 +544,8 @@ stages:
                   update_job
                 fi
 
-                # Track THIS run's execution by name: the reused job keeps its execution history,
-                # so "the first execution in the list" may be an older, already-finished one.
+                # Wait on this execution by name. The job keeps its history, so the first one
+                # in the list can be an old run.
                 EXECUTION=$(az containerapp job start --name "$MINIO_INIT_JOB" --resource-group "$RESOURCE_GROUP" \
                   --query name -o tsv)
                 [ -n "$EXECUTION" ] || { echo "##[error]job start returned no execution name"; exit 1; }
@@ -570,7 +556,7 @@ stages:
                   echo "  attempt $i: $STATUS"
                   [ "$STATUS" = "Succeeded" ] && break
                   if [ "$STATUS" = "Failed" ]; then
-                    echo "##[error]MinIO init job failed — check its logs in the portal"; exit 1
+                    echo "##[error]MinIO init job failed, check its logs in the portal"; exit 1
                   fi
                   sleep 10
                 done
@@ -621,12 +607,12 @@ stages:
                 set -e
                 case "$SPEECH_KEY" in
                   ""|'$('*)
-                    echo "##[warning]SPEECH_KEY not set in kdai-secrets — skipping WhisperLive shim deploy; transcription will not work."
+                    echo "##[warning]SPEECH_KEY not set in kdai-secrets, skipping WhisperLive shim deploy. Transcription will not work."
                     exit 0 ;;
                 esac
                 case "$SPEECH_REGION" in
                   ""|'$('*)
-                    echo "##[warning]SPEECH_REGION not set in kdai-secrets — skipping WhisperLive shim deploy."
+                    echo "##[warning]SPEECH_REGION not set in kdai-secrets, skipping WhisperLive shim deploy."
                     exit 0 ;;
                 esac
                 ACR_LOGIN_SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
@@ -844,17 +830,14 @@ stages:
                   "REVERB_SERVER_HOST=0.0.0.0"
                   "REVERB_SERVER_PORT=8081"
                   "REVERB_SERVER_PATH=/app"
-                  # Keep scaling OFF for this single-replica Reverb app (min=max=1). With it
-                  # ON, Reverb opens a Redis pub/sub subscriber; on the CAE's intermittent
-                  # ca-kdai-redis-inno-d DNS/NXDOMAIN blips it throws RedisConnectionException
-                  # after retrying 60s and the whole websocket server EXITS - so live
-                  # transcript segments never reach the browser even though CSP + the ATTS
-                  # listener are producing them fine. A single instance needs no Redis fan-out.
+                  # One replica, so no Redis fan-out needed. With scaling on, Reverb subscribes
+                  # to Redis pub/sub, and when ca-kdai-redis-inno-d briefly fails DNS
+                  # (NXDOMAIN, happens now and then in the CAE) it retries for 60s, throws
+                  # RedisConnectionException and exits. Live transcripts then never reach the
+                  # browser even though CSP and the ATTS listener are working.
                   "REVERB_SCALING_ENABLED=false"
-                  # Reverb only touches the cache for its `reverb:restart` signal. With no
-                  # CACHE_STORE the reverb image defaults to the DATABASE (sqlite) store and
-                  # crashes at boot ("database.sqlite does not exist") - this app has no DB.
-                  # A single in-memory instance needs none: use the array store.
+                  # Reverb only uses the cache for `reverb:restart`. The default store is
+                  # sqlite, and this app has no database ("database.sqlite does not exist").
                   "CACHE_STORE=array"
                   "REDIS_HOST=${REDIS_APP}"
                   "REDIS_PORT=6379"
@@ -936,11 +919,11 @@ stages:
                 done
                 case "$MINIO_BACKEND_USER" in ""|'$('*) MINIO_BACKEND_USER="kdai-backend" ;; esac
                 case "$MINIO_BACKEND_PASSWORD" in ""|'$('*) MINIO_BACKEND_PASSWORD="$MINIO_ROOT_PASSWORD" ;; esac
-                # LLM: Azure OpenAI's OpenAI-compatible chat-completions endpoint.
+                # Azure OpenAI's OpenAI-compatible chat completions endpoint
                 case "$AZURE_OPENAI_ENDPOINT" in ""|'$('*) AZURE_OPENAI_ENDPOINT="https://oai-kdai-inno-d.openai.azure.com" ;; esac
                 case "$AZURE_OPENAI_KEY" in
                   ""|'$('*)
-                    echo "##[warning]AZURE_OPENAI_KEY not set — question extraction / AI suggestions will fail auth."
+                    echo "##[warning]AZURE_OPENAI_KEY not set, question extraction and AI suggestions will fail auth."
                     AZURE_OPENAI_KEY="not-set" ;;
                 esac
                 LLM_URL="${AZURE_OPENAI_ENDPOINT%/}/openai/v1/chat/completions"
@@ -951,7 +934,7 @@ stages:
                 MINIO_FQDN=$(az containerapp show --name "$MINIO_APP" --resource-group "$RESOURCE_GROUP" \
                   --query "properties.configuration.ingress.fqdn" -o tsv)
                 [ -n "$MINIO_FQDN" ] || { echo "##[error]MinIO app not found"; exit 1; }
-                # Deterministic FQDNs (apps may be created later in this same job):
+                # Built by hand because some of these apps are created later in this job
                 NGINX_FQDN="${NGINX_APP}.${ENV_DOMAIN}"
                 CSP_FQDN="${CSP_APP}.internal.${ENV_DOMAIN}"
                 M3U8_FQDN="${M3U8_APP}.internal.${ENV_DOMAIN}"
@@ -1006,14 +989,14 @@ stages:
                   "REVERB_SCHEME=https"
                   "REVERB_PATH=/app"
                   "REVERB_SERVER_HOST=0.0.0.0"
-                  # broadcasting.php uses REVERB_SERVER_PORT for the server->Reverb POST,
-                  # which goes through the Reverb app's internal https ingress (443). The
-                  # in-container reverb process then binds :443 too — harmless, unused.
+                  # broadcasting.php uses REVERB_SERVER_PORT to POST to Reverb through its
+                  # internal https ingress on 443. The unused reverb process in this
+                  # container then also binds :443, which does no harm.
                   "REVERB_SERVER_PORT=443"
                   "REVERB_SERVER_PATH=/app"
-                  # Off: the backend's in-container reverb (supervisord) is unused - real
-                  # websockets run in the dedicated ca-kdai-reverb app. Scaling ON only makes
-                  # this unused server crash-loop on Redis pub/sub (see the Reverb app note).
+                  # The reverb process supervisord starts here is unused (websockets run in
+                  # ca-kdai-reverb). With scaling on it crash-loops on Redis pub/sub, see the
+                  # Reverb deploy step.
                   "REVERB_SCALING_ENABLED=false"
                   "REDIS_HOST=${REDIS_APP}"
                   "REDIS_PORT=6379"
@@ -1037,7 +1020,7 @@ stages:
                   az containerapp registry set \
                     --name "$BACKEND_APP" --resource-group "$RESOURCE_GROUP" \
                     --server "$ACR_LOGIN_SERVER" --identity system
-                  # php-fpm speaks fastcgi: plain TCP ingress, reachable as <app>:9000
+                  # fastcgi needs TCP ingress, reachable as <app>:9000
                   az containerapp ingress enable \
                     --name "$BACKEND_APP" --resource-group "$RESOURCE_GROUP" \
                     --type internal --transport tcp --target-port 9000 --exposed-port 9000

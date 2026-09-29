@@ -1,16 +1,14 @@
-# Substituted at container start by the nginx image's envsubst entrypoint.
-# Only ${BACKEND_FASTCGI}, ${REVERB_UPSTREAM} and ${FRONTEND_UPSTREAM} are env
-# vars; $-variables like $http_upgrade are nginx runtime vars and are left alone
-# (the entrypoint only substitutes variables that exist in the environment).
+# Rendered at container start by the nginx image's envsubst entrypoint. It only
+# substitutes variables set in the environment (BACKEND_FASTCGI, REVERB_UPSTREAM,
+# FRONTEND_UPSTREAM), so nginx vars like $http_upgrade are left alone.
 
-# php-fpm over the backend's Container Apps TCP ingress, with persistent connections.
-# Since the platform's 2026-09-18/19 replica moves, a reply is lost whenever php-fpm
-# closes the connection after answering (its default without keep-conn): php-fpm logs
-# 200, and nginx gets "recv() failed (104: Connection reset by peer) while reading response
-# header" -> 502 on every /api/ call. Rolling nginx/php back to the known-good versions
-# did not help, so it's the ingress. With fastcgi_keep_conn, php-fpm leaves the connection
-# open and nginx does the closing, like the Postgres/Redis clients on the same ingress,
-# which are unaffected. keepalive_timeout stays well below the ingress idle cut-off (~6 min).
+# php-fpm over the backend's TCP ingress, with persistent connections. Since the
+# platform moved replicas on 2026-09-18/19, replies get lost when php-fpm closes the
+# connection after answering: php-fpm logs a 200, nginx logs "recv() failed (104:
+# Connection reset by peer) while reading response header" and returns 502.
+# With fastcgi_keep_conn php-fpm keeps the connection open and nginx closes it, the
+# same as the Postgres and Redis clients on this ingress, which work fine.
+# keepalive_timeout is well under the ingress idle timeout (~6 min).
 upstream kdai_backend {
     server ${BACKEND_FASTCGI};
     keepalive 8;
@@ -23,7 +21,7 @@ server {
 
     client_max_body_size 2048M;
 
-    # API routes - Laravel via PHP-FPM (fastcgi over the backend's TCP ingress)
+    # Laravel API via php-fpm
     location /api/ {
         fastcgi_pass kdai_backend;
         fastcgi_keep_conn on;
@@ -33,24 +31,19 @@ server {
         fastcgi_param SCRIPT_FILENAME /app/public/index.php;
         fastcgi_param SCRIPT_NAME /index.php;
         fastcgi_param REQUEST_URI $uri?$args;
-        # TLS is terminated by Container Apps ingress; tell Laravel it is https.
+        # TLS ends at the Container Apps ingress
         fastcgi_param HTTPS on;
-        # Large emulation uploads (up to 2GB) can take a while to buffer to nginx
-        # and stream on to MinIO, so give php-fpm generous read/send windows.
+        # 2GB emulation uploads take a while to reach MinIO.
         fastcgi_read_timeout 600s;
         fastcgi_connect_timeout 75s;
         fastcgi_send_timeout 600s;
-        # Stream the request body straight to php-fpm instead of first buffering the
-        # whole thing to a temp file on nginx's small ephemeral disk (this app runs at
-        # 0.25 vCPU, ~1GB /tmp - a 2GB body would fill it and the upload would die on
-        # nginx before ever reaching the backend). php-fpm writes its own upload temp
-        # on the backend (1 vCPU, ~4GB), which fits 2GB.
+        # Stream the body to php-fpm. Buffering it here would fill nginx's ~1GB
+        # /tmp with a 2GB upload; the backend has ~4GB for php-fpm's temp file.
         fastcgi_request_buffering off;
     }
 
-    # WebSocket (Reverb) — proxied to the Reverb app's internal https ingress.
-    # No Host override: nginx sets Host to the upstream FQDN ($proxy_host),
-    # which Container Apps envoy needs for routing.
+    # Reverb websockets, via the Reverb app's internal https ingress.
+    # Host is left as the upstream FQDN ($proxy_host); envoy routes on it.
     location /app/ {
         proxy_pass ${REVERB_UPSTREAM};
         proxy_http_version 1.1;
@@ -71,7 +64,7 @@ server {
         add_header Content-Type text/plain;
     }
 
-    # Frontend SPA — proxied to the frontend app's internal https ingress.
+    # Frontend SPA, via the frontend app's internal https ingress.
     location / {
         proxy_pass ${FRONTEND_UPSTREAM};
         proxy_http_version 1.1;

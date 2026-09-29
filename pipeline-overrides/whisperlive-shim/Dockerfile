@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-# Azure Speech SDK runtime deps on Debian: OpenSSL 3, ALSA stubs, CA certs.
+# Azure Speech SDK needs OpenSSL 3, ALSA and CA certs
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates libssl3 libasound2 wget && \
     rm -rf /var/lib/apt/lists/*
