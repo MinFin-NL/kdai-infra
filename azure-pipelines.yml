@@ -508,8 +508,11 @@ stages:
                   esac
                 done
                 # Silo is a community fork of MinIO (github.com/pgsty/silo): same S3 API, data
-                # format and MINIO_* env vars, but the binary is `silo`, so the command is set
-                # on update too. Otherwise the existing app keeps `minio server /data`.
+                # format and MINIO_* env vars, but the binary is `silo`, so command and args are
+                # set on update too. The app was created with command ["minio"] and args
+                # ["server","/data"]. Setting only --command "silo" "server" "/data" kept those
+                # args, so it ran `silo server /data server /data` ("duplicate ellipses") and
+                # crash-looped, which broke emulation uploads.
                 MINIO_IMG="docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z"
 
                 if az containerapp show --name "$MINIO_APP" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
@@ -519,7 +522,8 @@ stages:
                   az containerapp update \
                     --name "$MINIO_APP" --resource-group "$RESOURCE_GROUP" \
                     --image "$MINIO_IMG" \
-                    --command "silo" "server" "/data" \
+                    --command "silo" \
+                    --args "server" "/data" \
                     --set-env-vars \
                       "MINIO_ROOT_USER=secretref:minio-root-user" \
                       "MINIO_ROOT_PASSWORD=secretref:minio-root-password"
@@ -528,7 +532,8 @@ stages:
                     --name "$MINIO_APP" --resource-group "$RESOURCE_GROUP" \
                     --environment "$CONTAINER_APP_ENV" \
                     --image "$MINIO_IMG" \
-                    --command "silo" "server" "/data" \
+                    --command "silo" \
+                    --args "server" "/data" \
                     --ingress internal --target-port 9000 --transport auto \
                     --secrets "minio-root-user=${MINIO_ROOT_USER}" "minio-root-password=${MINIO_ROOT_PASSWORD}" \
                     --env-vars \
