@@ -10,7 +10,7 @@ resources:
     - repository: kdai3
       type: github
       name: W-KDAI/kdai3
-      ref: refs/heads/master
+      ref: refs/heads/dev
       endpoint: github-kdai
 
 pool:
